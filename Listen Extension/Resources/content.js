@@ -1,14 +1,22 @@
 // Listen — content script
-// Phase 2: the “ ” button reads the selected text aloud with the built-in voice.
+// Phase 3: the “ ” button reads the selected text aloud with the Kokoro voice,
+// falling back to the built-in voice if Kokoro can't load.
 
 (() => {
     "use strict";
 
-    // ---------- Speech (swap this section out for Kokoro in Phase 3) ----------
-    // Interface: speech.speak(text, onEnd), speech.stop(), speech.isSpeaking()
+    // ---------- Speech ----------
+    // Interface: speech.speak(text, { onPlaying, onEnd }), speech.stop(), speech.isSpeaking()
+    // onPlaying fires when audio actually starts; onEnd fires once when reading finishes or is stopped.
 
-    const speech = (() => {
-        let current = null; // { utterance, onEnd }
+    // Silence added between pieces of text, in milliseconds.
+    const PAUSE = { clause: 120, sentence: 250, block: 650 };
+    // Kokoro truncates long input, so sentences longer than this are split at , ; :
+    const MAX_CHUNK_LENGTH = 300;
+
+    // Built-in Safari voice (fallback).
+    const builtinVoice = (() => {
+        let current = null; // { utterance, callbacks }
 
         function pickEnglishVoice() {
             const voices = window.speechSynthesis.getVoices();
@@ -20,10 +28,10 @@
             // Ignore events from an utterance that was already replaced or stopped.
             if (current !== entry) return;
             current = null;
-            entry.onEnd();
+            entry.callbacks.onEnd();
         }
 
-        function speak(text, onEnd) {
+        function speak(text, callbacks) {
             stop();
 
             const utterance = new SpeechSynthesisUtterance(text);
@@ -31,12 +39,13 @@
             if (voice) utterance.voice = voice;
             utterance.lang = voice ? voice.lang : "en-US";
 
-            const entry = { utterance, onEnd };
+            const entry = { utterance, callbacks };
             utterance.onend = () => finish(entry);
             utterance.onerror = () => finish(entry);
 
             current = entry;
             window.speechSynthesis.speak(utterance);
+            callbacks.onPlaying();
         }
 
         function stop() {
@@ -46,23 +55,210 @@
             if (entry) finish(entry);
         }
 
+        return { speak, stop, isSpeaking: () => current !== null };
+    })();
+
+    // Kokoro voice. The model runs in the background page; audio plays here with Web Audio.
+    const kokoroVoice = (() => {
+        let current = null; // see speak()
+
+        async function send(message) {
+            const response = await browser.runtime.sendMessage(message);
+            if (!response || !response.ok) throw new Error((response && response.error) || "No response");
+            return response;
+        }
+
+        // Splits text into [{ text, pause }] using line breaks for headings/paragraphs and
+        // Kokoro's sentence splitter for sentences.
+        async function splitIntoSegments(text) {
+            const blocks = text.split(/\n+/).map((b) => b.trim()).filter(Boolean);
+            const { sentences } = await send({ type: "listen:split", blocks });
+            const segments = [];
+            sentences.forEach((blockSentences, b) => {
+                blockSentences.forEach((sentence, s) => {
+                    const chunks = splitLongSentence(sentence);
+                    const isLastSentence = s === blockSentences.length - 1;
+                    const sentencePause =
+                        isLastSentence && b < sentences.length - 1 ? PAUSE.block : PAUSE.sentence;
+                    chunks.forEach((chunk, c) => {
+                        const pause = c === chunks.length - 1 ? sentencePause : PAUSE.clause;
+                        segments.push({ text: chunk, pause });
+                    });
+                });
+            });
+            return segments;
+        }
+
+        function splitLongSentence(sentence) {
+            if (sentence.length <= MAX_CHUNK_LENGTH) return [sentence];
+            const parts = sentence.split(/(?<=[,;:])\s+/);
+            const chunks = [];
+            let chunk = "";
+            for (const part of parts) {
+                if (chunk && chunk.length + part.length + 1 > MAX_CHUNK_LENGTH) {
+                    chunks.push(chunk);
+                    chunk = part;
+                } else {
+                    chunk = chunk ? `${chunk} ${part}` : part;
+                }
+            }
+            if (chunk) chunks.push(chunk);
+            return chunks;
+        }
+
+        function decodePcm16(base64) {
+            const binary = atob(base64);
+            const bytes = new Uint8Array(binary.length);
+            for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+            const pcm = new Int16Array(bytes.buffer);
+            const samples = new Float32Array(pcm.length);
+            for (let i = 0; i < pcm.length; i++) samples[i] = pcm[i] / 0x8000;
+            return samples;
+        }
+
+        function playSamples(entry, samples, sampleRate) {
+            return new Promise((resolve) => {
+                const buffer = entry.context.createBuffer(1, samples.length, sampleRate);
+                buffer.copyToChannel(samples, 0);
+                const source = entry.context.createBufferSource();
+                source.buffer = buffer;
+                source.connect(entry.context.destination);
+                source.onended = () => {
+                    entry.source = null;
+                    resolve();
+                };
+                entry.source = source;
+                source.start();
+            });
+        }
+
+        function wait(entry, ms) {
+            return new Promise((resolve) => {
+                entry.timer = setTimeout(resolve, ms);
+            });
+        }
+
+        function finish(entry) {
+            if (current !== entry) return;
+            current = null;
+            clearTimeout(entry.timer);
+            if (entry.source) {
+                entry.source.onended = null;
+                try { entry.source.stop(); } catch (e) {}
+            }
+            entry.context.close().catch(() => {});
+            try { entry.port.disconnect(); } catch (e) {}
+            entry.callbacks.onEnd();
+        }
+
+        // callbacks.onFail(remainingText) is called instead of onEnd if Kokoro can't continue.
+        async function speak(text, callbacks) {
+            stop();
+
+            // Create the audio context during the click so Safari allows playback.
+            const context = new AudioContext();
+            context.resume().catch(() => {});
+
+            let port = null;
+            try { port = browser.runtime.connect({ name: "listen-keepalive" }); } catch (e) {}
+
+            const entry = { context, port, callbacks, source: null, timer: null };
+            current = entry;
+            const isCurrent = () => current === entry;
+
+            let segments = [{ text, pause: 0 }];
+            let index = 0;
+            try {
+                await send({ type: "listen:load" });
+                if (!isCurrent()) return;
+                segments = await splitIntoSegments(text);
+                if (!isCurrent()) return;
+
+                const request = (i) =>
+                    i < segments.length ? send({ type: "listen:generate", text: segments[i].text }) : null;
+
+                let next = request(0);
+                for (index = 0; index < segments.length; index++) {
+                    const { audio, sampleRate } = await next;
+                    if (!isCurrent()) return;
+                    next = request(index + 1); // prepare the next piece while this one plays
+                    if (next) next.catch(() => {}); // handled when awaited
+
+                    if (index === 0) callbacks.onPlaying();
+                    await playSamples(entry, decodePcm16(audio), sampleRate);
+                    if (!isCurrent()) return;
+                    if (index < segments.length - 1) await wait(entry, segments[index].pause);
+                    if (!isCurrent()) return;
+                }
+                finish(entry);
+            } catch (error) {
+                if (!isCurrent()) return;
+                console.warn("[Listen] Kokoro voice failed, using the built-in voice:", error);
+                const remaining = segments.slice(index).map((s) => s.text).join(" ");
+                // Hand over without calling onEnd, so the reading continues seamlessly.
+                entry.callbacks = { onEnd() {} };
+                finish(entry);
+                callbacks.onFail(remaining);
+            }
+        }
+
+        function stop() {
+            if (current) finish(current);
+        }
+
+        return { speak, stop, isSpeaking: () => current !== null };
+    })();
+
+    const speech = (() => {
+        function speak(text, callbacks) {
+            stop();
+            kokoroVoice.speak(text, {
+                ...callbacks,
+                onFail(remaining) {
+                    if (remaining) builtinVoice.speak(remaining, callbacks);
+                    else callbacks.onEnd();
+                },
+            });
+        }
+
+        function stop() {
+            kokoroVoice.stop();
+            builtinVoice.stop();
+        }
+
         function isSpeaking() {
-            return current !== null;
+            return kokoroVoice.isSpeaking() || builtinVoice.isSpeaking();
         }
 
         return { speak, stop, isSpeaking };
     })();
 
+    // ---------- Reading ----------
+
+    let readingState = null; // null | "loading" | "playing"
+
     // Called when the user clicks the button.
     function onListen(text) {
-        speech.speak(text, onReadingEnded);
-        setButtonIcon("stop");
+        speech.speak(text, { onPlaying: onReadingPlaying, onEnd: onReadingEnded });
+        readingState = "loading";
+        setButtonIcon("loading");
+    }
+
+    function onReadingPlaying() {
+        readingState = "playing";
+        // Don't replace a fresh “ ” shown for a newer selection.
+        if (buttonIcon !== "listen") setButtonIcon("stop");
     }
 
     function onReadingEnded() {
+        readingState = null;
         setButtonIcon("listen");
         // If the selection is gone by the time reading ends, the button has nothing left to do.
         if (!readSelection()) hideButton();
+    }
+
+    function readingIcon() {
+        return readingState === "loading" ? "loading" : "stop";
     }
 
     // ---------- Button (isolated in a Shadow DOM so host page CSS can't touch it) ----------
@@ -72,6 +268,7 @@
 
     const ICONS = {
         listen: { text: "“”", label: "Read selected text aloud", title: "Listen" },
+        loading: { text: "", label: "Loading voice — click to cancel", title: "Loading voice…" },
         stop: { text: "■", label: "Stop reading", title: "Stop" },
     };
 
@@ -100,6 +297,18 @@
             font: 400 14px/1 -apple-system, "Helvetica Neue", sans-serif;
             padding-top: 0;
         }
+        button.loading { padding-top: 0; }
+        button.loading::after {
+            content: "";
+            box-sizing: border-box;
+            width: 14px;
+            height: 14px;
+            border: 2px solid rgba(255, 255, 255, 0.3);
+            border-top-color: #ffffff;
+            border-radius: 50%;
+            animation: listen-spin 0.8s linear infinite;
+        }
+        @keyframes listen-spin { to { transform: rotate(360deg); } }
         button:hover { transform: scale(1.08); }
         button:active { transform: scale(0.95); }
         button:focus-visible { outline: 2px solid #0a84ff; outline-offset: 2px; }
@@ -128,8 +337,8 @@
         button.addEventListener("click", (event) => {
             event.preventDefault();
             event.stopPropagation();
-            if (buttonIcon === "stop") {
-                speech.stop();
+            if (buttonIcon !== "listen") {
+                speech.stop(); // stop or cancel loading
             } else if (selectedText) {
                 onListen(selectedText);
             }
@@ -145,6 +354,7 @@
         button.title = icon.title;
         button.setAttribute("aria-label", icon.label);
         button.classList.toggle("stop", buttonIcon === "stop");
+        button.classList.toggle("loading", buttonIcon === "loading");
     }
 
     function setButtonIcon(name) {
@@ -163,7 +373,7 @@
         selectedText = "";
         // While reading, keep the button on screen as a stop button.
         if (speech.isSpeaking()) {
-            setButtonIcon("stop");
+            setButtonIcon(readingIcon());
             return;
         }
         if (host) host.style.display = "none";
