@@ -7,11 +7,25 @@ const GEMINI_MODEL = "gemini-3.5-flash-lite"; // free tier; see ai.google.dev/ge
 const REQUEST_TIMEOUT_MS = 30000;
 const MAX_CONTEXT_CHARS = 20000;
 
-const SYSTEM_INSTRUCTION =
-    "You answer questions about a passage the user highlighted on a web page. " +
-    "Use only the highlighted text, not outside knowledge. " +
-    "Answer briefly and clearly in plain sentences, without markdown. " +
-    "If the highlighted text doesn't contain the answer, say that it doesn't.";
+// What Gemini is asked to do for each action the content script can send.
+const INSTRUCTIONS = {
+    ask: () =>
+        "You answer questions about a passage the user highlighted on a web page. " +
+        "Use only the highlighted text, not outside knowledge. " +
+        "Answer briefly and clearly in plain sentences, without markdown. " +
+        "If the highlighted text doesn't contain the answer, say that it doesn't.",
+    summarize: () =>
+        "Summarize the passage the user highlighted on a web page in two or three short sentences. " +
+        "Use only that text. Plain sentences, without markdown.",
+    explain: () =>
+        "Explain the passage the user highlighted on a web page simply, as if to a beginner. " +
+        "Use short, plain sentences and everyday words, without markdown. Base the explanation on that text.",
+    translate: (target) =>
+        `Translate the passage the user highlighted on a web page into ${target}. ` +
+        "Reply with only the translation: no notes, quotes or explanations. " +
+        `If the passage is already entirely in ${target}, reply with one short sentence saying so.`,
+};
+const MAX_OUTPUT_TOKENS = { ask: 400, summarize: 400, explain: 600, translate: 2048 };
 
 // Thrown for failures the user should see; `message` is shown as is.
 class AskError extends Error {}
@@ -45,9 +59,13 @@ function errorFor(status, body) {
     return new AskError(`Gemini returned an error (${status}${error.message ? `: ${error.message}` : ""}).`);
 }
 
-async function ask(question, text) {
+// action: "ask" (with question), "summarize", "explain" or "translate" (with target language name).
+async function ask(action, question, text, target) {
+    if (!INSTRUCTIONS[action]) throw new AskError("Unknown request.");
+    if (action === "ask" && !question) throw new AskError("Type a question first.");
     const key = await loadApiKey();
     const passage = text.length > MAX_CONTEXT_CHARS ? text.slice(0, MAX_CONTEXT_CHARS) : text;
+    const quoted = `Highlighted text:\n"""\n${passage}\n"""`;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
@@ -58,9 +76,9 @@ async function ask(question, text) {
             headers: { "x-goog-api-key": key, "Content-Type": "application/json" },
             body: JSON.stringify({
                 model: GEMINI_MODEL,
-                system_instruction: SYSTEM_INSTRUCTION,
-                input: `Highlighted text:\n"""\n${passage}\n"""\n\nQuestion: ${question}`,
-                generation_config: { max_output_tokens: 400, thinking_level: "low" },
+                system_instruction: INSTRUCTIONS[action](target),
+                input: action === "ask" ? `${quoted}\n\nQuestion: ${question}` : quoted,
+                generation_config: { max_output_tokens: MAX_OUTPUT_TOKENS[action], thinking_level: "low" },
             }),
             signal: controller.signal,
         });
@@ -93,7 +111,10 @@ async function ask(question, text) {
 
 browser.runtime.onMessage.addListener((request) => {
     if (!request || request.type !== "listen:ask") return;
-    return ask(String(request.question || ""), String(request.text || "")).then(
+    // Only plain language names (e.g. "Spanish") are passed into the prompt.
+    const target = String(request.target || "English").replace(/[^\p{L} -]/gu, "").slice(0, 40) || "English";
+    const action = String(request.action || "ask");
+    return ask(action, String(request.question || "").trim(), String(request.text || ""), target).then(
         (answer) => ({ ok: true, answer }),
         (error) => {
             if (!(error instanceof AskError)) console.error("[Listen] Ask failed:", error);

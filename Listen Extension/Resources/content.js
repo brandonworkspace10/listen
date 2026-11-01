@@ -594,6 +594,7 @@
     // ---------- Reading ----------
 
     let lastReadText = ""; // the page text being (or last) read, for "?" while reading
+    let lastReadRange = null;
     let readingAnswer = false; // whether the current reading is the answer in the ask panel
 
     // Reads `range` aloud with word highlighting; `text` is the fallback if it can't be mapped.
@@ -615,6 +616,7 @@
     function onListen() {
         const range = selectedRange;
         lastReadText = selectedText;
+        lastReadRange = range;
         read(range, selectedText, false);
         // Clear the blue selection so it doesn't cover the word highlights.
         if (range) window.getSelection().removeAllRanges();
@@ -702,6 +704,18 @@
         .panel.above { top: auto; bottom: ${BUTTON_SIZE + 8}px; }
         .panel[hidden], .panel [hidden] { display: none; }
         .ask-row { display: flex; gap: 6px; align-items: center; }
+        .chips { display: flex; gap: 6px; margin-bottom: 8px; }
+        button.chip {
+            width: 82px;
+            height: 24px;
+            padding: 0;
+            border-radius: 12px;
+            background: #f2f2f7;
+            color: #1c1c1e;
+            font: 500 12px/1 -apple-system, "Helvetica Neue", sans-serif;
+            box-shadow: none;
+        }
+        button.chip:hover { background: #e5e5ea; transform: none; }
         input {
             all: initial;
             flex: 1;
@@ -910,14 +924,117 @@
 
     const ASK_TIMEOUT_MS = 45000;
 
-    let askPanel = null; // { panel, input, send, status, answerRow, answer, speak }
+    // Quick actions: [action sent to background.js, label, tooltip].
+    const CHIPS = [
+        ["summarize", "Summarize", "Short summary of the highlighted text"],
+        ["translate", "Translate", "Translate the highlighted text"],
+        ["explain", "Explain", "Explain the highlighted text simply"],
+    ];
+
+    let askPanel = null; // { panel, input, send, chips, status, answerRow, answer, speak }
     let askContext = ""; // the highlighted text questions are about
+    let askRange = null; // where that text is on the page, if known
     let askRequest = 0; // id of the latest question; older answers are ignored
+
+    // While the box is open the text it's about stays softly marked, since focusing the question
+    // field clears the page selection. Uses the CSS Custom Highlight API; nothing in the page changes.
+    const ASKED_CSS = "::highlight(listen-asked) { background-color: rgba(10, 132, 255, 0.22); }";
+    let askedSheet = null;
+
+    function markAsked(range) {
+        unmarkAsked();
+        if (!range || typeof Highlight !== "function" || typeof CSS === "undefined" || !CSS.highlights) return;
+        try {
+            askedSheet = new CSSStyleSheet();
+            askedSheet.replaceSync(ASKED_CSS);
+            document.adoptedStyleSheets = [...document.adoptedStyleSheets, askedSheet];
+            CSS.highlights.set("listen-asked", new Highlight(range));
+        } catch (e) {
+            console.warn("[Listen] Couldn't mark the highlighted text:", e);
+        }
+    }
+
+    function unmarkAsked() {
+        if (typeof CSS !== "undefined" && CSS.highlights) CSS.highlights.delete("listen-asked");
+        if (askedSheet) {
+            const sheet = askedSheet;
+            document.adoptedStyleSheets = document.adoptedStyleSheets.filter((s) => s !== sheet);
+            askedSheet = null;
+        }
+    }
+
+    // ----- Translation target -----
+    // The browser's language, or the last language the user typed ("translate to Spanish"), saved in
+    // browser.storage.local. If the text is already in that language, English is used instead.
+
+    const KNOWN_LANGUAGES = (
+        "en es fr de it pt nl sv no da fi pl cs sk hu ro bg el ru uk tr ar he fa hi bn ur th vi id ms tl zh ja ko sw ca"
+    ).split(" ");
+    let translateTarget = null; // { name, code } typed by the user, if any
+
+    function languageName(code) {
+        try {
+            return new Intl.DisplayNames(["en"], { type: "language" }).of(code) || code;
+        } catch (e) {
+            return code;
+        }
+    }
+
+    function codeForName(name) {
+        const wanted = name.trim().toLowerCase();
+        return KNOWN_LANGUAGES.find((code) => languageName(code).toLowerCase() === wanted) || null;
+    }
+
+    // "translate this to Spanish" / "Translate into french?" → { name: "Spanish", code: "es" }
+    function parseTranslateTarget(question) {
+        const match = question.match(/\btranslate\b.*?\b(?:to|into)\s+(\p{L}[\p{L} ]*?)\s*[?.!]*$/iu);
+        const code = match && codeForName(match[1]);
+        return code ? { name: languageName(code), code } : null;
+    }
+
+    function rememberTranslateTarget(target) {
+        translateTarget = target;
+        try {
+            browser.storage.local.set({ translateTarget: target }).catch(() => {});
+        } catch (e) {
+            // not saved; still used for this page
+        }
+    }
+
+    function translationTarget() {
+        const browserCode = navigator.language.split("-")[0].toLowerCase();
+        let target = translateTarget || { name: languageName(browserCode), code: browserCode };
+        const textCode = language.detect(askRange, askContext).split(/[-_]/)[0].toLowerCase();
+        if (textCode === target.code && target.code !== "en") target = { name: "English", code: "en" };
+        return target;
+    }
+
+    try {
+        browser.storage.local.get("translateTarget").then((items) => {
+            const saved = items.translateTarget;
+            if (saved && typeof saved.name === "string" && typeof saved.code === "string") translateTarget = saved;
+        }, () => {});
+    } catch (e) {
+        // storage unavailable; the browser language is used
+    }
 
     function createAskPanel() {
         const panel = document.createElement("div");
         panel.className = "panel";
         panel.hidden = true;
+
+        const chips = document.createElement("div");
+        chips.className = "chips";
+        const chipButtons = CHIPS.map(([action, label, title]) => {
+            const chip = document.createElement("button");
+            chip.type = "button";
+            chip.className = "chip";
+            chip.textContent = label;
+            chip.title = title;
+            chip.addEventListener("click", () => sendChip(action));
+            return chip;
+        });
+        chips.append(...chipButtons);
 
         const row = document.createElement("div");
         row.className = "ask-row";
@@ -947,8 +1064,8 @@
         speak.className = "speak";
         answerRow.append(answer, speak);
 
-        panel.append(row, status, answerRow);
-        askPanel = { panel, input, send, status, answerRow, answer, speak };
+        panel.append(chips, row, status, answerRow);
+        askPanel = { panel, input, send, chips: chipButtons, status, answerRow, answer, speak };
         setAnswerSpeakIcon(false);
 
         // Keep typing out of the page (site shortcuts) and out of our own page-level key handlers.
@@ -981,6 +1098,8 @@
         const context = selectedText || lastReadText;
         if (!context || !host) return;
         askContext = context;
+        askRange = selectedText ? selectedRange : lastReadRange;
+        markAsked(askRange);
         if (!askPanel) barShadow.append(createAskPanel());
         askRequest++;
         askPanel.input.value = "";
@@ -996,6 +1115,7 @@
         askRequest++; // ignore an answer still on its way
         if (readingAnswer) speech.stop();
         askPanel.panel.hidden = true;
+        unmarkAsked();
     }
 
     // Opens below the bar, or above it if there's no room; shifted left to stay inside the window.
@@ -1021,39 +1141,63 @@
         placeAskPanel();
     }
 
-    function showAnswer(text) {
+    // `lang`: the answer's language when known (translations), so read-aloud picks the right voice.
+    function showAnswer(text, lang) {
         const { status, answerRow, answer } = askPanel;
         status.hidden = true;
         answer.textContent = text;
+        if (lang) answer.lang = lang;
+        else answer.removeAttribute("lang");
         answer.scrollTop = 0;
         language.prepare(text);
         answerRow.hidden = false;
         placeAskPanel();
     }
 
-    async function sendQuestion() {
-        const { input, send } = askPanel;
-        const question = input.value.trim();
-        if (!question || send.disabled) return;
+    function setAskBusy(busy) {
+        askPanel.send.disabled = busy;
+        for (const chip of askPanel.chips) chip.disabled = busy;
+    }
+
+    function sendQuestion() {
+        const question = askPanel.input.value.trim();
+        if (!question) return;
+        const target = parseTranslateTarget(question);
+        if (target) rememberTranslateTarget(target);
+        askGemini({ action: "ask", question }, target ? target.code : "");
+    }
+
+    function sendChip(action) {
+        if (action !== "translate") {
+            askGemini({ action }, "");
+            return;
+        }
+        const target = translationTarget();
+        askGemini({ action, target: target.name }, target.code);
+    }
+
+    // Sends `request` ({ action, question?, target? }) about askContext and shows the reply.
+    async function askGemini(request, answerLang) {
+        if (askPanel.send.disabled) return;
         if (readingAnswer) speech.stop();
 
         const id = ++askRequest;
-        send.disabled = true;
+        setAskBusy(true);
         showAskStatus("loading", "Thinking…");
         let response;
         try {
             const timeout = new Promise((resolve) =>
                 setTimeout(() => resolve({ ok: false, error: "No answer came back in time. Try again." }), ASK_TIMEOUT_MS)
             );
-            const request = browser.runtime.sendMessage({ type: "listen:ask", question, text: askContext });
-            response = await Promise.race([request, timeout]);
+            const message = browser.runtime.sendMessage({ type: "listen:ask", ...request, text: askContext });
+            response = await Promise.race([message, timeout]);
         } catch (e) {
             response = { ok: false, error: "Couldn't reach Listen's background page. Reload the page and try again." };
         }
-        send.disabled = false;
+        setAskBusy(false);
         if (id !== askRequest) return; // closed or replaced by a newer question
         if (!response) response = { ok: false, error: "No answer came back. Try again." };
-        if (response.ok) showAnswer(response.answer);
+        if (response.ok) showAnswer(response.answer, answerLang);
         else showAskStatus("error", response.error);
     }
 
