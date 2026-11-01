@@ -131,6 +131,7 @@
         const HIGHLIGHT_CSS = `
             ::highlight(listen-current) { background-color: ${COLORS.current}; color: #000; }
             ::highlight(listen-next) { background-color: ${COLORS.next}; color: #000; }
+            ::highlight(listen-spoken) { background-color: transparent; }
         `;
         const SKIPPED_TAGS = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE", "TEXTAREA", "SELECT"]);
         const supportsHighlights =
@@ -140,6 +141,8 @@
         let map = []; // map[i] = { node, offset } in the page for text[i]; null for added line breaks
         let styles = null; // { sheet } or { element } holding HIGHLIGHT_CSS
         let overlay = null; // fallback only: { host, shadow, boxes: { current: [], next: [] } }
+        const painted = { current: null, next: null }; // ranges currently painted per highlight
+        let spoken = null; // Highlight of words already left behind (see paint())
 
         // ----- Building the spoken text from the page -----
 
@@ -313,6 +316,17 @@
                 paintOverlay(name, range);
                 return;
             }
+            // Safari doesn't repaint a word whose highlight moved to a word in another element, leaving
+            // it yellow. Adding the old range to a transparent highlight forces that repaint.
+            const old = painted[name];
+            if (old && range) {
+                if (!spoken) {
+                    spoken = new Highlight();
+                    CSS.highlights.set("listen-spoken", spoken);
+                }
+                spoken.add(old);
+            }
+            painted[name] = range;
             if (range) CSS.highlights.set(`listen-${name}`, new Highlight(range));
             else CSS.highlights.delete(`listen-${name}`);
         }
@@ -341,6 +355,10 @@
         function clear() {
             paint("current", null);
             paint("next", null);
+            if (spoken) {
+                CSS.highlights.delete("listen-spoken");
+                spoken = null;
+            }
             if (overlay) {
                 overlay.host.remove();
                 overlay = null;
