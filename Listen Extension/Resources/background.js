@@ -1,5 +1,5 @@
 // Listen — background page
-// Answers questions about highlighted text, images and charts with Gemini. The API key lives in secrets.js (git-ignored)
+// Answers questions about highlighted text, code, images and charts with Gemini. The API key lives in secrets.js (git-ignored)
 // and is only ever used here, never sent to content scripts or logged.
 
 const GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/interactions";
@@ -65,6 +65,24 @@ const CHART_INSTRUCTIONS = {
 const CHART_MAX_OUTPUT_TOKENS = { describe: 400, keynumbers: 600, explain: 600, ask: 400 };
 const MAX_CAPTURED_IMAGE_CHARS = 12 * 1024 * 1024; // base64 of a captured chart (well under Gemini's 20 MB)
 const MAX_CHART_TEXT_CHARS = 4000;
+
+// The same, for selected code. Answers are read aloud, so they describe the code in plain English
+// instead of repeating its symbols.
+const CODE_INSTRUCTIONS = {
+    explain: () =>
+        "Explain in two to four plain-English sentences what this code does, for someone listening rather than " +
+        "reading. Don't read the code out or use symbols. No markdown.",
+    linebyline: () =>
+        "Explain this code line by line (a few lines at a time if it's long), in plain-English sentences suited to " +
+        "listening: no code symbols, no markdown, no bullet points. Describe what each part does.",
+    bugs: () =>
+        "Look for real bugs or risky mistakes in this code. In plain-English sentences, without markdown, describe " +
+        "each problem and how to fix it. If you find none, say so. Don't invent problems.",
+    ask: () =>
+        "Answer the user's question about this code briefly and clearly in plain-English sentences, without " +
+        "markdown or code symbols. If the code doesn't show the answer, say so.",
+};
+const CODE_MAX_OUTPUT_TOKENS = { explain: 400, linebyline: 1500, bugs: 1000, ask: 500 };
 
 // Thrown for failures the user should see; `message` is shown as is. `imageUnavailable` marks an image
 // that couldn't be fetched or decoded, so the page can fall back to its alt text.
@@ -180,13 +198,19 @@ async function chartImagePart(chart) {
 // About an image (image.src): "ask", "describe", "readtext" or "explain".
 // About a chart (chart: { src } or { data, mime_type }, plus labels and caption): "ask", "describe",
 // "keynumbers" or "explain".
-async function ask({ action, question, text, target, image, chart }) {
-    const instructions = chart ? CHART_INSTRUCTIONS : image ? IMAGE_INSTRUCTIONS : INSTRUCTIONS;
+// About code (code: { text, language }): "ask", "explain", "linebyline" or "bugs".
+async function ask({ action, question, text, target, image, chart, code }) {
+    const instructions = code ? CODE_INSTRUCTIONS : chart ? CHART_INSTRUCTIONS : image ? IMAGE_INSTRUCTIONS : INSTRUCTIONS;
     if (!instructions[action]) throw new AskError("Unknown request.");
     if (action === "ask" && !question) throw new AskError("Type a question first.");
     const key = await loadApiKey();
     let input;
-    if (chart) {
+    if (code) {
+        const source = String(code.text || "").slice(0, MAX_CONTEXT_CHARS);
+        const language = String(code.language || "").replace(/[^\w+#. -]/g, "").slice(0, 30);
+        const quoted = `Code${language ? ` (${language})` : ""}:\n"""\n${source}\n"""`;
+        input = action === "ask" ? `${quoted}\n\nQuestion: ${question}` : quoted;
+    } else if (chart) {
         // The docs recommend the text prompt before a single image. Labels found in an svg chart and
         // the chart's caption help with small or overlapping text.
         let prompt = action === "ask" ? `Question: ${question}` : "Here is the chart.";
@@ -217,7 +241,9 @@ async function ask({ action, question, text, target, image, chart }) {
                 system_instruction: instructions[action](target),
                 input,
                 generation_config: {
-                    max_output_tokens: (chart ? CHART_MAX_OUTPUT_TOKENS : image ? IMAGE_MAX_OUTPUT_TOKENS : MAX_OUTPUT_TOKENS)[action],
+                    max_output_tokens: (code
+                        ? CODE_MAX_OUTPUT_TOKENS
+                        : chart ? CHART_MAX_OUTPUT_TOKENS : image ? IMAGE_MAX_OUTPUT_TOKENS : MAX_OUTPUT_TOKENS)[action],
                     thinking_level: "low",
                 },
             }),
@@ -247,7 +273,8 @@ async function ask({ action, question, text, target, image, chart }) {
         .join("")
         .trim();
     if (!answer) throw new AskError("Gemini didn't return an answer. Try rephrasing the question.");
-    return answer;
+    // Code answers are read aloud; drop markdown backticks around code names.
+    return code ? answer.replace(/`+/g, "") : answer;
 }
 
 browser.runtime.onMessage.addListener((request) => {
@@ -256,6 +283,7 @@ browser.runtime.onMessage.addListener((request) => {
     const target = String(request.target || "English").replace(/[^\p{L} -]/gu, "").slice(0, 40) || "English";
     const image = request.image && typeof request.image.src === "string" ? { src: request.image.src } : null;
     const chart = request.chart && typeof request.chart === "object" ? request.chart : null;
+    const code = request.code && typeof request.code.text === "string" ? request.code : null;
     return ask({
         action: String(request.action || "ask"),
         question: String(request.question || "").trim(),
@@ -263,6 +291,7 @@ browser.runtime.onMessage.addListener((request) => {
         target,
         image,
         chart,
+        code,
     }).then(
         (answer) => ({ ok: true, answer }),
         (error) => {

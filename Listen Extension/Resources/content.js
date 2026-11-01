@@ -856,6 +856,11 @@
     // Called when the user clicks the “ ” button.
     function onListen() {
         const range = selectedRange;
+        const codeBlock = selectedCodeBlock;
+        if (codeBlock) {
+            onListenCode(selectedText, codeBlock); // see Code
+            return;
+        }
         lastReadText = selectedText;
         lastReadRange = range;
         read(range, selectedText, false);
@@ -996,6 +1001,7 @@
             font: 400 13px/1.4 -apple-system, "Helvetica Neue", sans-serif;
         }
         .note[hidden] { display: none; }
+        .note.info { color: #1c1c1e; }
         input {
             all: initial;
             flex: 1;
@@ -1053,6 +1059,7 @@
     let buttonIcon = "listen";
     let selectedText = "";
     let selectedRange = null;
+    let selectedCodeBlock = null; // the code block the selection is in (see Code), or null
 
     function createBar() {
         host = document.createElement("listen-extension-root");
@@ -1147,6 +1154,7 @@
     function hideBar() {
         selectedText = "";
         selectedRange = null;
+        selectedCodeBlock = null;
         // While reading, asking or describing an image, keep the bar on screen.
         if (isAskOpen() || imageBusy) return;
         if (speech.isSpeaking()) {
@@ -1228,7 +1236,8 @@
     let askContext = ""; // the highlighted text questions are about
     let askRange = null; // where that text is on the page, if known
     let askImage = null; // the image or chart questions are about, instead of text
-    let askKind = "image"; // "image" or "chart"
+    let askKind = "text"; // "text", "code", "image" or "chart"
+    let askCode = null; // the code block questions are about, when askKind is "code"
     let askRequest = 0; // id of the latest question; older answers are ignored
 
     // While the box is open the text it's about stays softly marked, since focusing the question
@@ -1396,16 +1405,17 @@
         const context = selectedText || lastReadText;
         if ((!imageTarget && !context) || !host) return;
         askImage = imageTarget;
-        askKind = imageKind;
+        askCode = !askImage && selectedText ? selectedCodeBlock : null;
+        askKind = askImage ? imageKind : askCode ? "code" : "text";
         askContext = askImage ? "" : context;
         askRange = askImage ? null : selectedText ? selectedRange : lastReadRange;
         markAsked(askRange);
         if (!askPanel) barShadow.append(createAskPanel());
         if (note) note.hidden = true;
-        renderChips(!askImage ? CHIPS : askKind === "chart" ? CHART_CHIPS : IMAGE_CHIPS);
-        askPanel.input.placeholder = !askImage
-            ? "Ask about the highlighted text…"
-            : askKind === "chart" ? "Ask about the chart…" : "Ask about the image…";
+        const chips = { text: CHIPS, code: CODE_CHIPS, image: IMAGE_CHIPS, chart: CHART_CHIPS };
+        const placeholders = { text: "highlighted text", code: "code", image: "image", chart: "chart" };
+        renderChips(chips[askKind]);
+        askPanel.input.placeholder = `Ask about the ${placeholders[askKind]}…`;
         askRequest++;
         askPanel.input.value = "";
         askPanel.status.hidden = true;
@@ -1504,7 +1514,8 @@
         showAskStatus("loading", "Thinking…");
         let about;
         try {
-            if (!askImage) about = { text: askContext };
+            if (askKind === "code") about = { code: { text: askContext, language: codeLanguage(askCode) } };
+            else if (!askImage) about = { text: askContext };
             else if (askKind === "chart") about = { chart: await chartInfo(askImage) };
             else about = { image: imageInfo(askImage) };
         } catch (error) {
@@ -1587,16 +1598,18 @@
         return response.imageUnavailable && alt ? `${response.error} Its alt text says: “${alt}”` : response.error;
     }
 
-    function showNote(message) {
+    // kind "error" (red, hides itself after a while) or "info" (stays until hidden, e.g. "Explaining code…").
+    function showNote(message, kind = "error") {
         if (!note) {
             note = document.createElement("div");
             note.className = "note";
             barShadow.append(note);
         }
         note.textContent = message;
+        note.classList.toggle("info", kind === "info");
         note.hidden = false;
         clearTimeout(noteTimer);
-        noteTimer = setTimeout(() => (note.hidden = true), NOTE_MS);
+        if (kind !== "info") noteTimer = setTimeout(() => (note.hidden = true), NOTE_MS);
     }
 
     function showImageBar(img, kind = "image") {
@@ -1640,9 +1653,11 @@
         if (fallBack) readAbout(img, alt);
     }
 
+    // Cancels a pending image, chart or code request (the spinner was clicked).
     function cancelImageRequest() {
         imageRequest++;
         imageBusy = false;
+        if (note) note.hidden = true;
         setButtonIcon("listen");
     }
 
@@ -1855,6 +1870,83 @@
         if (fallBack) readAbout(el, alt);
     }
 
+    // ---------- Code ----------
+    // A selection inside a code block isn't read symbol by symbol: “ ” asks Gemini (through background.js)
+    // for a short plain-English explanation and reads that, outlining the block; "?" offers Explain /
+    // Line by line / Find bugs. A single word or name in code is just read normally.
+
+    // Elements that hold code (GitHub, Pygments, highlight.js, CodeMirror, plain <pre>/<code>) ...
+    const CODE_SELECTOR =
+        "pre, code, div.highlight, figure.highlight, .blob-code, .react-code-lines, .react-code-file-contents, " +
+        ".hljs, .cm-content";
+    // ... and the block around them that gets outlined.
+    const CODE_BLOCK_SELECTOR = "pre, div.highlight, figure.highlight, .react-code-file-contents, .blob-wrapper, .cm-editor";
+    const CODE_CHIPS = [
+        ["explain", "Explain", "Explain what the code does"],
+        ["linebyline", "Line by line", "Go through the code line by line"],
+        ["bugs", "Find bugs", "Look for mistakes in the code"],
+    ];
+
+    // The code block `range` is inside, or null if it isn't code or is just one word or name.
+    function codeBlockFor(range, text) {
+        if (!range || !/\s/.test(text.trim())) return null;
+        const node = range.commonAncestorContainer;
+        const el = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
+        const code = el && el.closest(CODE_SELECTOR);
+        return code ? code.closest(CODE_BLOCK_SELECTOR) || code : null;
+    }
+
+    // The code's language from classes like "language-js", "lang-py" or "highlight-source-python".
+    function codeLanguage(block) {
+        const pattern = /(?:^|\s)(?:language|lang|highlight-source)-([\w+#.-]+)/i;
+        const candidates = [block, ...block.querySelectorAll("[class*='language-'], [class*='lang-']")];
+        for (let el = block.parentElement; el && el !== document.body; el = el.parentElement) candidates.push(el);
+        for (const el of candidates) {
+            const match = typeof el.className === "string" && el.className.match(pattern);
+            if (match) return match[1];
+        }
+        return "";
+    }
+
+    // Some code viewers (GitHub's file view) keep the selection in a read-only text field laid over the
+    // code, so it never shows up as a page selection.
+    let lastPointer = null; // where the mouse was last released, to place the bar for such selections
+
+    function isReadOnlyCodeField(el) {
+        const readOnly = el && (el.readOnly || el.getAttribute("aria-readonly") === "true");
+        return Boolean(readOnly && el.tagName === "TEXTAREA" && /code|blob/i.test(`${el.id} ${el.className}`));
+    }
+
+    // The selection in a read-only code field, shaped like readSelection()'s result, or null.
+    function readOnlyCodeSelection() {
+        const field = document.activeElement;
+        if (!isReadOnlyCodeField(field)) return null;
+        const text = field.value.slice(field.selectionStart, field.selectionEnd).trim();
+        if (!text) return null;
+        const box = field.getBoundingClientRect();
+        const x = lastPointer ? lastPointer.x : box.left + 40;
+        const y = lastPointer ? lastPointer.y : Math.max(box.top, 0) + 40;
+        const block = field.closest(".react-code-file-contents") || field.parentElement;
+        return { text, range: null, rect: { left: x, right: x, top: y - 16, bottom: y + 4 }, codeBlock: /\s/.test(text) ? block : null };
+    }
+
+    async function onListenCode(code, block) {
+        const id = ++imageRequest;
+        imageBusy = true;
+        setButtonIcon("loading");
+        showNote("Explaining code…", "info");
+        const response = await askBackground({ action: "explain", code: { text: code, language: codeLanguage(block) } });
+        if (id !== imageRequest) return; // cancelled
+        imageBusy = false;
+        if (note) note.hidden = true;
+        if (response.ok) {
+            readAbout(block, response.answer);
+            return;
+        }
+        setButtonIcon("listen");
+        showNote(response.error);
+    }
+
     // ---------- Selection ----------
 
     function isEditable(node) {
@@ -1864,8 +1956,11 @@
         return el.isContentEditable;
     }
 
-    // Returns { text, range, rect } for a usable selection, or null.
+    // Returns { text, range, rect, codeBlock } for a usable selection, or null. `range` is null for text
+    // selected in a read-only code viewer's text field (see Code).
     function readSelection() {
+        const codeField = readOnlyCodeSelection();
+        if (codeField) return codeField;
         // Text selected inside <input>/<textarea> is reported through activeElement.
         if (isEditable(document.activeElement) && document.activeElement !== document.body) {
             return null;
@@ -1883,7 +1978,7 @@
         const rect = rects[rects.length - 1];
         if (!rect) return null;
 
-        return { text, range: range.cloneRange(), rect };
+        return { text, range: range.cloneRange(), rect, codeBlock: codeBlockFor(range, text) };
     }
 
     function updateBar() {
@@ -1898,6 +1993,7 @@
         if (result.text !== selectedText) setButtonIcon("listen");
         selectedText = result.text;
         selectedRange = result.range;
+        selectedCodeBlock = result.codeBlock;
         imageTarget = null; // a text selection takes the bar over from an image
         language.prepare(result.text);
         showBar(result.rect);
@@ -1907,6 +2003,7 @@
 
     document.addEventListener("mouseup", (event) => {
         if (isBarEvent(event)) return;
+        lastPointer = { x: event.clientX, y: event.clientY };
         // Wait a tick so the browser finishes updating the selection.
         setTimeout(updateBar, 0);
     });
@@ -1940,6 +2037,7 @@
     // Hide as soon as the selection is cleared.
     document.addEventListener("selectionchange", () => {
         if (isAskOpen()) return; // focusing the question field clears the page selection
+        if (readOnlyCodeSelection()) return; // a code viewer's own text field holds the selection
         const selection = window.getSelection();
         if (!selection || selection.isCollapsed) hideBar();
     });
