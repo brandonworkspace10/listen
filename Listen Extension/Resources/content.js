@@ -7,8 +7,9 @@
 
     // ---------- Speech (swap this section out for a better voice later) ----------
     // Interface: speech.speak(text, { onWord, onWordTimingUnavailable, onEnd }), speech.stop(),
-    // speech.isSpeaking(). onWord(charIndex, charLength) gives the position in `text` of the word
-    // being spoken (charLength may be 0); onEnd fires once when reading finishes or is stopped.
+    // speech.isSpeaking(), speech.setRate(rate). onWord(charIndex, charLength) gives the position in
+    // `text` of the word being spoken (charLength may be 0); onEnd fires once when reading finishes
+    // or is stopped.
 
     const speech = (() => {
         // Novelty voices macOS ships alongside the real ones; never pick these.
@@ -68,6 +69,8 @@
         // How long after speech starts to wait for the first word position before giving up on it.
         const WORD_TIMING_GRACE_MS = 2000;
 
+        let rate = 1;
+
         function finish(entry) {
             // Ignore events from an utterance that was already replaced or stopped.
             if (current !== entry) return;
@@ -76,35 +79,57 @@
             entry.callbacks.onEnd();
         }
 
-        function speak(text, callbacks) {
-            stop();
-
-            bestVoice = pickBestVoice() || bestVoice;
-            const utterance = new SpeechSynthesisUtterance(text);
+        // Speaks entry.text from character `from` at the current rate. Word positions are reported
+        // relative to the whole text, so a restart mid-text keeps the highlight in sync.
+        function startUtterance(entry, from) {
+            const utterance = new SpeechSynthesisUtterance(entry.text.slice(from));
             if (bestVoice) utterance.voice = bestVoice;
             utterance.lang = bestVoice ? bestVoice.lang : "en-US";
+            utterance.rate = rate;
 
-            const entry = { utterance, callbacks, sawWord: false, wordTimingCheck: null };
-            utterance.onend = () => finish(entry);
-            utterance.onerror = () => finish(entry);
+            // Events from an utterance replaced by a speed change are ignored.
+            const isLive = () => current === entry && entry.utterance === utterance;
+            utterance.onend = () => isLive() && finish(entry);
+            utterance.onerror = () => isLive() && finish(entry);
 
             // Word positions come from "boundary" events; some voices never send them.
             utterance.onboundary = (event) => {
-                if (current !== entry || (event.name && event.name !== "word")) return;
+                if (!isLive() || (event.name && event.name !== "word")) return;
                 entry.sawWord = true;
-                callbacks.onWord(event.charIndex, event.charLength || 0);
+                entry.wordStart = from + event.charIndex;
+                entry.callbacks.onWord(entry.wordStart, event.charLength || 0);
             };
             utterance.onstart = () => {
+                if (entry.sawWord || entry.wordTimingCheck) return;
                 entry.wordTimingCheck = setTimeout(() => {
                     if (current !== entry || entry.sawWord) return;
                     const name = bestVoice ? bestVoice.name : "This voice";
                     console.info(`[Listen] ${name} doesn't report word positions, so words won't be highlighted.`);
-                    callbacks.onWordTimingUnavailable();
+                    entry.callbacks.onWordTimingUnavailable();
                 }, WORD_TIMING_GRACE_MS);
             };
 
-            current = entry;
+            entry.utterance = utterance;
             window.speechSynthesis.speak(utterance);
+        }
+
+        function speak(text, callbacks) {
+            stop();
+            bestVoice = pickBestVoice() || bestVoice;
+            const entry = { text, callbacks, utterance: null, wordStart: 0, sawWord: false, wordTimingCheck: null };
+            current = entry;
+            startUtterance(entry, 0);
+        }
+
+        // Changes the speaking rate (1 = normal). speechSynthesis can't change the rate of an
+        // utterance in progress, so a reading in progress restarts from the word being spoken.
+        function setRate(newRate) {
+            rate = newRate;
+            const entry = current;
+            if (!entry) return;
+            entry.utterance = null; // silences the old utterance's events
+            window.speechSynthesis.cancel();
+            startUtterance(entry, entry.wordStart);
         }
 
         function stop() {
@@ -118,7 +143,7 @@
             return current !== null;
         }
 
-        return { speak, stop, isSpeaking };
+        return { speak, stop, isSpeaking, setRate };
     })();
 
     // ---------- Word highlighting ----------
@@ -474,10 +499,11 @@
         highlighter.clear();
         setButtonIcon("listen");
         // If the selection is gone by the time reading ends, the button has nothing left to do.
-        if (!readSelection()) hideButton();
+        if (!readSelection()) hideBar();
     }
 
-    // ---------- Button (isolated in a Shadow DOM so host page CSS can't touch it) ----------
+    // ---------- Floating bar (isolated in a Shadow DOM so host page CSS can't touch it) ----------
+    // A row of buttons: “ ” (listen / stop) and the speed button. More buttons can be added to the row.
 
     const BUTTON_SIZE = 30;
     const OFFSET = 6;
@@ -487,8 +513,13 @@
         stop: { text: "■", label: "Stop reading", title: "Stop" },
     };
 
-    const BUTTON_CSS = `
+    const BAR_CSS = `
         :host { all: initial; }
+        .bar {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
         button {
             all: initial;
             box-sizing: border-box;
@@ -512,32 +543,43 @@
             font: 400 14px/1 -apple-system, "Helvetica Neue", sans-serif;
             padding-top: 0;
         }
+        /* Fixed width (fits "1.25x") so the button doesn't move under the pointer as the label changes. */
+        button.speed {
+            width: 54px;
+            padding: 0;
+            border-radius: ${BUTTON_SIZE / 2}px;
+            font: 600 13px/1 -apple-system, "Helvetica Neue", sans-serif;
+            font-variant-numeric: tabular-nums;
+        }
         button:hover { transform: scale(1.08); }
         button:active { transform: scale(0.95); }
         button:focus-visible { outline: 2px solid #0a84ff; outline-offset: 2px; }
     `;
 
     let host = null;
-    let button = null;
+    let button = null; // “ ” / ■
+    let speedButton = null;
     let buttonIcon = "listen";
     let selectedText = "";
     let selectedRange = null;
 
-    function createButton() {
+    function createBar() {
         host = document.createElement("listen-extension-root");
         host.style.cssText =
             "all: initial; position: absolute; z-index: 2147483647; display: none;";
 
         const shadow = host.attachShadow({ mode: "closed" });
         const style = document.createElement("style");
-        style.textContent = BUTTON_CSS;
+        style.textContent = BAR_CSS;
+
+        const bar = document.createElement("div");
+        bar.className = "bar";
+        // Keep the page selection intact when any button is pressed.
+        bar.addEventListener("mousedown", (event) => event.preventDefault());
 
         button = document.createElement("button");
         button.type = "button";
         applyIcon();
-
-        // Keep the page selection intact when the button is pressed.
-        button.addEventListener("mousedown", (event) => event.preventDefault());
         button.addEventListener("click", (event) => {
             event.preventDefault();
             event.stopPropagation();
@@ -548,7 +590,18 @@
             }
         });
 
-        shadow.append(style, button);
+        speedButton = document.createElement("button");
+        speedButton.type = "button";
+        speedButton.className = "speed";
+        applySpeed();
+        speedButton.addEventListener("click", (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            setSpeed(nextSpeed(), true);
+        });
+
+        bar.append(button, speedButton);
+        shadow.append(style, bar);
         document.documentElement.appendChild(host);
     }
 
@@ -565,17 +618,25 @@
         if (button) applyIcon();
     }
 
-    function showButton(x, y) {
-        if (!host || !host.isConnected) createButton();
-        host.style.left = `${x}px`;
-        host.style.top = `${y}px`;
+    // Shows the bar just below-right of `rect` (the selection's last line), kept inside the viewport.
+    function showBar(rect) {
+        if (!host || !host.isConnected) createBar();
         host.style.display = "block";
+        const width = host.offsetWidth || BUTTON_SIZE;
+        const height = host.offsetHeight || BUTTON_SIZE;
+        const maxX = document.documentElement.clientWidth - width - OFFSET;
+        const maxY = document.documentElement.clientHeight - height - OFFSET;
+        const x = Math.min(rect.right + OFFSET, maxX);
+        let y = rect.bottom + OFFSET;
+        if (y > maxY) y = rect.top - height - OFFSET;
+        host.style.left = `${Math.max(OFFSET, x) + window.scrollX}px`;
+        host.style.top = `${Math.max(OFFSET, y) + window.scrollY}px`;
     }
 
-    function hideButton() {
+    function hideBar() {
         selectedText = "";
         selectedRange = null;
-        // While reading, keep the button on screen as a stop button.
+        // While reading, keep the bar on screen so it can stop the reading or change its speed.
         if (speech.isSpeaking()) {
             setButtonIcon("stop");
             return;
@@ -583,8 +644,53 @@
         if (host) host.style.display = "none";
     }
 
-    function isButtonEvent(event) {
+    function isBarEvent(event) {
         return host !== null && event.composedPath().includes(host);
+    }
+
+    // ---------- Speed (remembered across sites in browser.storage.local) ----------
+
+    const SPEEDS = [1, 1.25, 1.5, 2, 0.75];
+    let speed = 1;
+
+    function nextSpeed() {
+        return SPEEDS[(SPEEDS.indexOf(speed) + 1) % SPEEDS.length];
+    }
+
+    function applySpeed() {
+        speedButton.textContent = `${speed}x`;
+        speedButton.title = "Reading speed";
+        speedButton.setAttribute("aria-label", `Reading speed ${speed}x. Click to change.`);
+    }
+
+    // Applies a speed (restarting a reading in progress from the current word) and optionally saves it.
+    function setSpeed(value, save) {
+        speed = value;
+        speech.setRate(value);
+        if (speedButton) applySpeed();
+        if (!save) return;
+        try {
+            browser.storage.local.set({ speed: value }).catch((e) => console.warn("[Listen] Couldn't save speed:", e));
+        } catch (e) {
+            console.warn("[Listen] Couldn't save speed:", e);
+        }
+    }
+
+    try {
+        browser.storage.local.get("speed").then(
+            (items) => {
+                if (SPEEDS.includes(items.speed)) setSpeed(items.speed, false);
+            },
+            (e) => console.warn("[Listen] Couldn't load speed:", e)
+        );
+        // Keep other open tabs in step when the speed changes in one of them.
+        browser.storage.onChanged.addListener((changes, area) => {
+            const change = changes.speed;
+            if (area !== "local" || !change || !SPEEDS.includes(change.newValue)) return;
+            if (change.newValue !== speed) setSpeed(change.newValue, false);
+        });
+    } catch (e) {
+        console.warn("[Listen] Speed storage unavailable:", e);
     }
 
     // ---------- Selection ----------
@@ -618,10 +724,10 @@
         return { text, range: range.cloneRange(), rect };
     }
 
-    function updateButton() {
+    function updateBar() {
         const result = readSelection();
         if (!result) {
-            hideButton();
+            hideBar();
             return;
         }
 
@@ -629,49 +735,40 @@
         if (result.text !== selectedText) setButtonIcon("listen");
         selectedText = result.text;
         selectedRange = result.range;
-        const { rect } = result;
-
-        // Place just below-right of the selection's last line, kept inside the viewport.
-        const maxX = document.documentElement.clientWidth - BUTTON_SIZE - OFFSET;
-        const maxY = document.documentElement.clientHeight - BUTTON_SIZE - OFFSET;
-        let x = Math.min(rect.right + OFFSET, maxX);
-        let y = rect.bottom + OFFSET;
-        if (y > maxY) y = rect.top - BUTTON_SIZE - OFFSET;
-
-        showButton(Math.max(OFFSET, x) + window.scrollX, Math.max(OFFSET, y) + window.scrollY);
+        showBar(result.rect);
     }
 
     // ---------- Events ----------
 
     document.addEventListener("mouseup", (event) => {
-        if (isButtonEvent(event)) return;
+        if (isBarEvent(event)) return;
         // Wait a tick so the browser finishes updating the selection.
-        setTimeout(updateButton, 0);
+        setTimeout(updateBar, 0);
     });
 
     document.addEventListener("mousedown", (event) => {
-        if (!isButtonEvent(event)) hideButton();
+        if (!isBarEvent(event)) hideBar();
     });
 
     // Keyboard selection (Shift + arrows, Cmd+A).
     document.addEventListener("keyup", (event) => {
-        if (event.shiftKey || event.metaKey || event.key === "Shift") updateButton();
+        if (event.shiftKey || event.metaKey || event.key === "Shift") updateBar();
     });
 
     // Escape stops any reading and hides the button.
     document.addEventListener("keydown", (event) => {
         if (event.key !== "Escape") return;
         speech.stop();
-        hideButton();
+        hideBar();
     });
 
     // Hide as soon as the selection is cleared.
     document.addEventListener("selectionchange", () => {
         const selection = window.getSelection();
-        if (!selection || selection.isCollapsed) hideButton();
+        if (!selection || selection.isCollapsed) hideBar();
     });
 
-    window.addEventListener("resize", hideButton);
+    window.addEventListener("resize", hideBar);
 
     // Don't keep talking after the user leaves the page.
     window.addEventListener("pagehide", () => speech.stop());
