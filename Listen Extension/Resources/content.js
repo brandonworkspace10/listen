@@ -9,8 +9,6 @@
     // Interface: speech.speak(text, { onPlaying, onEnd }), speech.stop(), speech.isSpeaking()
     // onPlaying fires when audio actually starts; onEnd fires once when reading finishes or is stopped.
 
-    // Silence added between pieces of text, in milliseconds.
-    const PAUSE = { clause: 120, sentence: 250, block: 650 };
     // Kokoro truncates long input, so sentences longer than this are split at , ; :
     const MAX_CHUNK_LENGTH = 300;
 
@@ -158,24 +156,17 @@
             }
         }
 
-        // Splits text into [{ text, pause }] using line breaks for headings/paragraphs and
+        // Splits text into [{ text }] using line breaks for headings/paragraphs and
         // Kokoro's sentence splitter for sentences.
         async function splitIntoSegments(text) {
             const blocks = text.split(/\n+/).map((b) => b.trim()).filter(Boolean);
             const { sentences } = await send({ type: "listen:split", blocks });
             const segments = [];
-            sentences.forEach((blockSentences, b) => {
-                blockSentences.forEach((sentence, s) => {
-                    const chunks = splitLongSentence(sentence);
-                    const isLastSentence = s === blockSentences.length - 1;
-                    const sentencePause =
-                        isLastSentence && b < sentences.length - 1 ? PAUSE.block : PAUSE.sentence;
-                    chunks.forEach((chunk, c) => {
-                        const pause = c === chunks.length - 1 ? sentencePause : PAUSE.clause;
-                        segments.push({ text: chunk, pause });
-                    });
-                });
-            });
+            for (const blockSentences of sentences) {
+                for (const sentence of blockSentences) {
+                    for (const chunk of splitLongSentence(sentence)) segments.push({ text: chunk });
+                }
+            }
             return segments;
         }
 
@@ -251,6 +242,21 @@
                 source.connect(context.destination);
                 const startedAt = context.currentTime;
 
+                // Measure the level actually reaching the output, half a second in.
+                const analyser = context.createAnalyser();
+                analyser.fftSize = 2048;
+                source.connect(analyser);
+                setTimeout(() => {
+                    const data = new Float32Array(analyser.fftSize);
+                    analyser.getFloatTimeDomainData(data);
+                    let sum = 0;
+                    for (const v of data) sum += v * v;
+                    console.info(
+                        `[Listen] Output level 0.5 s in: RMS ${Math.sqrt(sum / data.length).toFixed(4)} ` +
+                        `(clock advanced ${(context.currentTime - startedAt).toFixed(2)} s)`
+                    );
+                }, Math.min(500, buffer.duration * 500));
+
                 // If the sound never finishes, fail with the reason instead of hanging.
                 entry.watchdog = setTimeout(() => {
                     source.onended = null;
@@ -273,16 +279,9 @@
             });
         }
 
-        function wait(entry, ms) {
-            return new Promise((resolve) => {
-                entry.timer = setTimeout(resolve, ms);
-            });
-        }
-
         function finish(entry) {
             if (current !== entry) return;
             current = null;
-            clearTimeout(entry.timer);
             clearTimeout(entry.watchdog);
             if (entry.source) {
                 entry.source.onended = null;
@@ -299,11 +298,11 @@
             stop();
             const context = unlockAudio();
 
-            const entry = { context, callbacks, source: null, timer: null, watchdog: null };
+            const entry = { context, callbacks, source: null, watchdog: null };
             current = entry;
             const isCurrent = () => current === entry;
 
-            let segments = [{ text, pause: 0 }];
+            let segments = [{ text }];
             let index = 0;
             let step = "loading the voice";
             try {
@@ -334,14 +333,15 @@
                     step = `playing ${piece}`;
                     await ensureRunning(context);
                     const samples = decodePcm16(audio);
+                    let peak = 0;
+                    for (let i = 0; i < samples.length; i++) peak = Math.max(peak, Math.abs(samples[i]));
                     console.info(
-                        `[Listen] Playing ${piece}: ${(samples.length / sampleRate).toFixed(1)} s, ` +
-                        `AudioContext ${context.state}, clock ${context.currentTime.toFixed(2)} s`
+                        `[Listen] Playing ${piece}: ${(samples.length / sampleRate).toFixed(1)} s at ${sampleRate} Hz, ` +
+                        `peak ${peak.toFixed(3)}, AudioContext ${context.state} at ${context.sampleRate} Hz, ` +
+                        `clock ${context.currentTime.toFixed(2)} s`
                     );
                     if (index === 0) callbacks.onPlaying();
                     await playSamples(entry, samples, sampleRate);
-                    if (!isCurrent()) return;
-                    if (index < segments.length - 1) await wait(entry, segments[index].pause);
                     if (!isCurrent()) return;
                 }
                 console.info("[Listen] Finished reading with the Kokoro voice");

@@ -84,13 +84,27 @@ function generate(text) {
         const started = performance.now();
         const audio = await tts.generate(text, { voice: VOICE });
         const seconds = audio.audio.length / audio.sampling_rate;
+        const { peak, nan } = measure(audio.audio);
         console.info(
-            `[Listen] Kokoro generated ${seconds.toFixed(1)} s of audio in ${Math.round(performance.now() - started)} ms`
+            `[Listen] Kokoro generated ${seconds.toFixed(1)} s of audio in ${Math.round(performance.now() - started)} ms ` +
+            `(peak ${peak.toFixed(3)}, NaN samples ${nan}, ${audio.sampling_rate} Hz)`
         );
         return { audio: encodePcm16(audio.audio), sampleRate: audio.sampling_rate };
     });
     generateQueue = job.catch(() => {});
     return job;
+}
+
+// Peak level (0–1) and count of NaN samples, for diagnosing silent output.
+function measure(samples) {
+    let peak = 0;
+    let nan = 0;
+    for (let i = 0; i < samples.length; i++) {
+        const v = samples[i];
+        if (Number.isNaN(v)) nan++;
+        else if (Math.abs(v) > peak) peak = Math.abs(v);
+    }
+    return { peak, nan };
 }
 
 // Float32 samples → 16-bit PCM → base64, so audio passes safely through extension messaging.
