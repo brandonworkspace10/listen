@@ -330,22 +330,229 @@
             return style.display === "none" || style.visibility === "hidden";
         }
 
+        // ----- Writing the spoken text (each character remembers where it came from) -----
+
+        // Adds characters [start, end) of a text node, collapsing whitespace the way the page shows it.
+        function appendNodeText(node, start, end) {
+            const data = node.data;
+            for (let i = start; i < end; i++) {
+                if (/\s/.test(data[i])) {
+                    if (!text || /\s$/.test(text)) continue;
+                    text += " ";
+                } else {
+                    text += data[i];
+                }
+                map.push({ node, offset: i });
+            }
+        }
+
+        // Adds words that aren't on the page (table announcements, "Header:" punctuation).
+        function appendSpoken(words) {
+            for (const ch of words) {
+                text += ch;
+                map.push(null);
+            }
+        }
+
+        function trimEnd() {
+            while (/\s$/.test(text)) {
+                text = text.slice(0, -1);
+                map.pop();
+            }
+        }
+
+        // Ends the current line, so a heading, paragraph or table row is spoken as its own sentence.
+        function lineBreak() {
+            if (!text) return;
+            trimEnd();
+            text += "\n";
+            map.push(null);
+        }
+
+        // Footnote markers such as "[14]" or "[note 1]" in superscript.
+        function isFootnoteMarker(el) {
+            return el.tagName === "SUP" && /^\[[^\]]{1,10}\]$/.test(el.textContent.trim());
+        }
+
+        // Adds all visible text inside an element (a table cell or caption), without footnote markers.
+        function appendElementText(el) {
+            const walker = document.createTreeWalker(el, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
+                acceptNode(node) {
+                    if (node.nodeType === Node.TEXT_NODE) return NodeFilter.FILTER_ACCEPT;
+                    if (isHidden(node) || isFootnoteMarker(node)) return NodeFilter.FILTER_REJECT;
+                    return node.tagName === "BR" ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP;
+                },
+            });
+            for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+                if (node.nodeType === Node.ELEMENT_NODE) {
+                    if (text && !/\s$/.test(text)) appendSpoken(" "); // <br> inside a cell
+                } else {
+                    appendNodeText(node, 0, node.data.length);
+                }
+            }
+        }
+
+        // ----- Tables -----
+        // A selection covering more than one cell of a table is read row by row as "Header: value, ...",
+        // after announcing its size. Only the rows and columns between the cells where the selection
+        // starts and ends are read (a selection running past the table covers it to that edge);
+        // empty cells and footnote markers are skipped.
+
+        // The table's cells as a grid, with colspan/rowspan cells repeated in every slot they cover.
+        function tableGrid(table) {
+            const grid = [];
+            Array.from(table.rows).forEach((row, r) => {
+                grid[r] = grid[r] || [];
+                let c = 0;
+                for (const cell of row.cells) {
+                    while (grid[r][c]) c++;
+                    const rowSpan = cell.rowSpan > 0 ? cell.rowSpan : table.rows.length - r;
+                    for (let i = 0; i < rowSpan && r + i < table.rows.length; i++) {
+                        grid[r + i] = grid[r + i] || [];
+                        for (let j = 0; j < Math.max(1, cell.colSpan); j++) grid[r + i][c + j] = cell;
+                    }
+                    c += Math.max(1, cell.colSpan);
+                }
+            });
+            return grid;
+        }
+
+        // Leading rows made only of <th> cells (or in <thead>); if there are none, the first row.
+        function headerRowCount(table, grid) {
+            let count = 0;
+            while (count < grid.length - 1) {
+                const row = table.rows[count];
+                const cells = grid[count].filter(Boolean);
+                const isHeader = row.parentElement.tagName === "THEAD" || cells.every((cell) => cell.tagName === "TH");
+                if (!isHeader) break;
+                count++;
+            }
+            return grid.length > 1 ? Math.max(count, 1) : 0;
+        }
+
+        function cellsIn(table, range) {
+            return Array.from(table.querySelectorAll("td, th")).filter(
+                (cell) => cell.closest("table") === table && range.intersectsNode(cell)
+            );
+        }
+
+        // Whether `table` should be read as a table: the selection must cover more than one of its cells.
+        function readsAsTable(table, range) {
+            return cellsIn(table, range).length > 1;
+        }
+
+        function cellIsEmpty(cell) {
+            return !cell || !cell.textContent.trim();
+        }
+
+        // Grid slots [first, last] of a cell, as { r, c } pairs.
+        function slotsOf(grid, cell) {
+            let first = null;
+            let last = null;
+            grid.forEach((row, r) =>
+                row.forEach((slot, c) => {
+                    if (slot !== cell) return;
+                    if (!first) first = { r, c };
+                    last = { r, c };
+                })
+            );
+            return first && { first, last };
+        }
+
+        // The cell (or, failing that, the row) of `table` that a selection boundary is in, else null.
+        function boundaryIn(table, node) {
+            const el = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
+            const cell = el && el.closest("td, th");
+            if (cell && cell.closest("table") === table) return { cell };
+            const row = el && el.closest("tr");
+            if (row && row.closest("table") === table) return { row };
+            return null;
+        }
+
+        function appendTable(table, range) {
+            const grid = tableGrid(table);
+            const width = Math.max(...grid.map((row) => row.length));
+            const headerRows = headerRowCount(table, grid);
+
+            // The selected rectangle: from where the selection starts to where it ends.
+            const start = boundaryIn(table, range.startContainer);
+            const end = boundaryIn(table, range.endContainer);
+            const startSlots = start && start.cell && slotsOf(grid, start.cell);
+            const endSlots = end && end.cell && slotsOf(grid, end.cell);
+            const rowIndex = (b, slots, fallback) =>
+                slots ? (b === start ? slots.first.r : slots.last.r) : b && b.row ? b.row.rowIndex : fallback;
+            const r0 = rowIndex(start, startSlots, 0);
+            const r1 = rowIndex(end, endSlots, grid.length - 1);
+            let c0 = 0;
+            let c1 = width - 1;
+            if (startSlots && endSlots) {
+                c0 = Math.min(startSlots.first.c, endSlots.first.c);
+                c1 = Math.max(startSlots.last.c, endSlots.last.c);
+            }
+            const columns = [];
+            for (let c = c0; c <= c1; c++) columns.push(c);
+            let rows = [];
+            for (let r = Math.max(r0, headerRows); r <= r1; r++) rows.push(r);
+            const headerOnly = rows.length === 0;
+            if (headerOnly) rows = [0]; // only header cells selected: read them as a plain row
+
+            lineBreak();
+            if (table.caption && range.intersectsNode(table.caption) && !cellIsEmpty(table.caption)) {
+                appendElementText(table.caption);
+                lineBreak();
+            }
+            const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+            appendSpoken(`Table with ${plural(columns.length, "column")} and ${plural(rows.length, "row")}.`);
+            lineBreak();
+
+            for (const r of rows) {
+                const seen = new Set(); // a colspan cell is read once per row
+                let first = true;
+                for (const c of columns) {
+                    const cell = grid[r][c];
+                    if (cellIsEmpty(cell) || seen.has(cell)) continue;
+                    seen.add(cell);
+                    if (!first) appendSpoken(", ");
+                    first = false;
+                    // Header text for this column (several header rows are joined), unless it's the cell itself.
+                    const headers = headerOnly ? [] : [...new Set(grid.slice(0, headerRows).map((row) => row[c]))]
+                        .filter((h) => h && h !== cell && !cellIsEmpty(h));
+                    for (const header of headers) {
+                        appendElementText(header);
+                        trimEnd();
+                        appendSpoken(" ");
+                    }
+                    if (headers.length) {
+                        trimEnd();
+                        appendSpoken(": ");
+                    }
+                    appendElementText(cell);
+                    trimEnd();
+                }
+                if (!first && !/[.!?]$/.test(text)) appendSpoken(".");
+                lineBreak();
+            }
+        }
+
+        // ----- Building the spoken text from a selection -----
+
         // Walks the text inside `range` and records where each character of the spoken text came from.
-        // Whitespace is collapsed the way the page displays it; headings, paragraphs and <br> become "\n".
+        // Whitespace is collapsed the way the page displays it; headings, paragraphs and <br> become "\n";
+        // tables are read row by row (see Tables).
         function buildTextMap(range) {
             text = "";
             map = [];
-            const lineBreak = () => {
-                if (!text) return;
-                if (/\s$/.test(text)) {
-                    text = text.slice(0, -1);
-                    map.pop();
-                }
-                text += "\n";
-                map.push(null);
-            };
 
             const root = range.commonAncestorContainer;
+            const rootEl = root.nodeType === Node.ELEMENT_NODE ? root : root.parentElement;
+            // A selection entirely inside one table never meets the <table> element while walking.
+            const enclosingTable = rootEl && rootEl.closest("table");
+            if (enclosingTable && readsAsTable(enclosingTable, range)) {
+                appendTable(enclosingTable, range);
+                trimEnd();
+                return;
+            }
+
             const walker = document.createTreeWalker(
                 root.nodeType === Node.TEXT_NODE ? root.parentNode : root,
                 NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT,
@@ -354,38 +561,35 @@
                         if (!range.intersectsNode(node)) return NodeFilter.FILTER_REJECT;
                         if (node.nodeType === Node.TEXT_NODE) return NodeFilter.FILTER_ACCEPT;
                         if (isHidden(node)) return NodeFilter.FILTER_REJECT;
+                        if (node.tagName === "TABLE" && readsAsTable(node, range)) return NodeFilter.FILTER_ACCEPT;
                         return node.tagName === "BR" ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP;
                     },
                 }
             );
 
             let lastBlock = null;
+            let doneTable = null; // a table already read; its contents are skipped
             for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+                if (doneTable && doneTable.contains(node)) continue;
                 if (node.nodeType === Node.ELEMENT_NODE) {
-                    lineBreak(); // <br>
+                    if (node.tagName === "TABLE") {
+                        appendTable(node, range);
+                        doneTable = node;
+                        lastBlock = node;
+                    } else {
+                        lineBreak(); // <br>
+                    }
                     continue;
                 }
                 const block = blockOf(node);
                 if (lastBlock && block !== lastBlock) lineBreak();
                 lastBlock = block;
 
-                const data = node.data;
                 const start = node === range.startContainer ? range.startOffset : 0;
-                const end = node === range.endContainer ? range.endOffset : data.length;
-                for (let i = start; i < end; i++) {
-                    if (/\s/.test(data[i])) {
-                        if (!text || /\s$/.test(text)) continue;
-                        text += " ";
-                    } else {
-                        text += data[i];
-                    }
-                    map.push({ node, offset: i });
-                }
+                const end = node === range.endContainer ? range.endOffset : node.data.length;
+                appendNodeText(node, start, end);
             }
-            while (/\s$/.test(text)) {
-                text = text.slice(0, -1);
-                map.pop();
-            }
+            trimEnd();
         }
 
         // ----- Turning text positions into page ranges -----
