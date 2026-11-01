@@ -519,6 +519,7 @@
 
     const BUTTON_SIZE = 30;
     const OFFSET = 6;
+    const ASK_PANEL_WIDTH = 320;
 
     const ICONS = {
         listen: { text: "“”", label: "Read selected text aloud", title: "Listen" },
@@ -793,7 +794,6 @@
     // The question is sent to background.js, which holds the API key and calls Gemini.
 
     const ASK_TIMEOUT_MS = 45000;
-    const ASK_PANEL_WIDTH = 320;
 
     let askPanel = null; // { panel, input, send, status, answerRow, answer, speak }
     let askContext = ""; // the highlighted text questions are about
