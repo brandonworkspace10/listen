@@ -8,3 +8,6 @@ build/
 *.ipa
 *.dSYM.zip
 *.dSYM
+
+# Local secrets (API keys) — never commit
+Listen Extension/Resources/secrets.js
