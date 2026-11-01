@@ -123,26 +123,48 @@
 
     // ---------- Word highlighting ----------
     // Interface: highlighter.prepare(range) → text to speak; highlighter.showWord(charIndex, charLength);
-    // highlighter.clear(). Uses the CSS Custom Highlight API, which paints over the page's text
-    // without touching its DOM; falls back to overlay boxes if the API is missing.
+    // highlighter.clear(). Draws one rounded "pill" over the current and next word: yellow fading into
+    // orange. It lives in its own Shadow DOM overlay, so the page's DOM and layout are never touched.
 
     const highlighter = (() => {
-        const COLORS = { current: "#ffe033", next: "#ffad33" };
-        const HIGHLIGHT_CSS = `
-            ::highlight(listen-current) { background-color: ${COLORS.current}; color: #000; }
-            ::highlight(listen-next) { background-color: ${COLORS.next}; color: #000; }
-            ::highlight(listen-spoken) { background-color: transparent; }
-        `;
+        const COLORS = { current: "#ffe033", next: "#ffad33", nextClear: "rgba(255, 173, 51, 0)" };
+        const PAD_X = 4; // px of pill around the words
+        const PAD_Y = 1;
+        const BLEND_PX = 8; // how far the yellow→orange blend reaches into each word
+        const GLIDE_MS = 160;
+        const FADE_IN_MS = 150;
+        const FADE_OUT_MS = 500;
         const SKIPPED_TAGS = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE", "TEXTAREA", "SELECT"]);
-        const supportsHighlights =
-            typeof CSS !== "undefined" && "highlights" in CSS && typeof Highlight === "function";
+
+        // Layer 1: solid orange under the next word. Layer 2: transparent→orange blend. Base: yellow.
+        // Only positions and sizes change per word, so every part of the move can be transitioned.
+        const PILL_CSS = `
+            .pill {
+                position: absolute;
+                left: 0;
+                top: 0;
+                width: 0;
+                height: 0;
+                opacity: 0;
+                border-radius: 9999px;
+                background-color: ${COLORS.current};
+                background-image:
+                    linear-gradient(${COLORS.next}, ${COLORS.next}),
+                    linear-gradient(to right, ${COLORS.nextClear}, ${COLORS.next});
+                background-repeat: no-repeat;
+                will-change: transform, width;
+                transition-property: transform, width, height, background-position, background-size, opacity;
+                transition-duration: ${GLIDE_MS}ms, ${GLIDE_MS}ms, ${GLIDE_MS}ms, ${GLIDE_MS}ms, ${GLIDE_MS}ms, ${FADE_IN_MS}ms;
+                transition-timing-function: ease-out;
+            }
+        `;
 
         let text = ""; // the text being spoken
         let map = []; // map[i] = { node, offset } in the page for text[i]; null for added line breaks
-        let styles = null; // { sheet } or { element } holding HIGHLIGHT_CSS
-        let overlay = null; // fallback only: { host, shadow, boxes: { current: [], next: [] } }
-        const painted = { current: null, next: null }; // ranges currently painted per highlight
-        let spoken = null; // Highlight of words already left behind (see paint())
+        let overlay = null; // { host, pill } for the current reading
+        let words = null; // { current: Range, next: Range | null } being shown
+        let lastTop = null; // viewport top of the pill's line, to detect line changes
+        let layoutQueued = false;
 
         // ----- Building the spoken text from the page -----
 
@@ -258,77 +280,98 @@
             }
         }
 
-        // ----- Painting -----
+        // ----- Drawing the pill -----
 
-        function installStyles() {
-            if (styles || !supportsHighlights) return;
-            // A constructed stylesheet isn't blocked by the page's Content Security Policy.
-            try {
-                const sheet = new CSSStyleSheet();
-                sheet.replaceSync(HIGHLIGHT_CSS);
-                document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
-                styles = { sheet };
-            } catch (e) {
-                const element = document.createElement("style");
-                element.textContent = HIGHLIGHT_CSS;
-                document.documentElement.appendChild(element);
-                styles = { element };
-            }
+        function createOverlay() {
+            const host = document.createElement("listen-highlight-root");
+            // Multiply blending lets the page's text show through, so the pill looks like it's behind it.
+            host.style.cssText =
+                "all: initial; position: absolute; left: 0; top: 0; width: 0; height: 0; " +
+                "pointer-events: none; z-index: 2147483646; mix-blend-mode: multiply;";
+            const shadow = host.attachShadow({ mode: "closed" });
+            const style = document.createElement("style");
+            style.textContent = PILL_CSS;
+            const pill = document.createElement("div");
+            pill.className = "pill";
+            shadow.append(style, pill);
+            document.documentElement.appendChild(host);
+            return { host, pill };
         }
 
-        function removeStyles() {
-            if (!styles) return;
-            if (styles.sheet) {
-                document.adoptedStyleSheets = document.adoptedStyleSheets.filter((s) => s !== styles.sheet);
-            } else {
-                styles.element.remove();
+        // The box of a word's first line (a word split across inline elements has several rects).
+        function lineBox(range) {
+            const rects = [...range.getClientRects()].filter((r) => r.width > 0 && r.height > 0);
+            if (rects.length === 0) return null;
+            const first = rects[0];
+            const box = { left: first.left, right: first.right, top: first.top, bottom: first.bottom };
+            for (const r of rects) {
+                if (Math.abs(r.top - first.top) > first.height / 2) continue;
+                box.left = Math.min(box.left, r.left);
+                box.right = Math.max(box.right, r.right);
+                box.top = Math.min(box.top, r.top);
+                box.bottom = Math.max(box.bottom, r.bottom);
             }
-            styles = null;
+            return box;
         }
 
-        function paintOverlay(name, range) {
-            if (!overlay) {
-                const host = document.createElement("listen-highlight-root");
-                host.style.cssText =
-                    "all: initial; position: absolute; left: 0; top: 0; width: 0; height: 0; " +
-                    "pointer-events: none; z-index: 2147483646;";
-                const shadow = host.attachShadow({ mode: "closed" });
-                document.documentElement.appendChild(host);
-                overlay = { host, shadow, boxes: { current: [], next: [] } };
+        // Positions the pill over `words`. instant: move without gliding (scroll, resize, line change).
+        function layout(instant) {
+            if (!overlay || !words) return;
+            const cur = lineBox(words.current);
+            if (!cur) return;
+            let next = words.next ? lineBox(words.next) : null;
+            // If the next word starts a new line, the pill covers the current word only.
+            const height = cur.bottom - cur.top;
+            if (next && (Math.abs(next.top - cur.top) > height / 2 || next.left < cur.right)) next = null;
+
+            const left = cur.left - PAD_X;
+            const right = (next ? next.right : cur.right) + PAD_X;
+            const top = Math.min(cur.top, next ? next.top : cur.top) - PAD_Y;
+            const bottom = Math.max(cur.bottom, next ? next.bottom : cur.bottom) + PAD_Y;
+            const width = right - left;
+
+            // Blend from just before the end of the current word to just into the next word.
+            let blendFrom = width;
+            let blendTo = width;
+            if (next) {
+                blendFrom = cur.right - left - Math.min(BLEND_PX, (cur.right - cur.left) * 0.3);
+                blendTo = next.left - left + Math.min(BLEND_PX, (next.right - next.left) * 0.3);
             }
-            for (const box of overlay.boxes[name]) box.remove();
-            overlay.boxes[name] = [];
-            if (!range) return;
-            for (const rect of range.getClientRects()) {
-                const box = document.createElement("div");
-                box.style.cssText =
-                    `position: absolute; left: ${rect.left + window.scrollX}px; top: ${rect.top + window.scrollY}px; ` +
-                    `width: ${rect.width}px; height: ${rect.height}px; background: ${COLORS[name]}; ` +
-                    "opacity: 0.45; border-radius: 2px;";
-                overlay.shadow.appendChild(box);
-                overlay.boxes[name].push(box);
+
+            const { pill } = overlay;
+            const firstShow = lastTop === null;
+            const lineChanged = !firstShow && Math.abs(top - lastTop) > height / 2;
+            const jump = instant || firstShow || lineChanged;
+            if (jump) pill.style.transition = `opacity ${FADE_IN_MS}ms ease-out`;
+
+            pill.style.transform = `translate(${left + window.scrollX}px, ${top + window.scrollY}px)`;
+            pill.style.width = `${width}px`;
+            pill.style.height = `${bottom - top}px`;
+            pill.style.backgroundPosition = `${blendTo}px 0, ${blendFrom}px 0`;
+            pill.style.backgroundSize = `${width - blendTo}px 100%, ${blendTo - blendFrom}px 100%`;
+            pill.style.opacity = "1";
+
+            if (jump) {
+                void pill.offsetWidth; // apply the jump before glides are re-enabled
+                pill.style.transition = "";
             }
+            lastTop = top;
         }
 
-        // name: "current" (yellow) or "next" (orange); range null removes it.
-        function paint(name, range) {
-            if (!supportsHighlights) {
-                paintOverlay(name, range);
-                return;
-            }
-            // Safari doesn't repaint a word whose highlight moved to a word in another element, leaving
-            // it yellow. Adding the old range to a transparent highlight forces that repaint.
-            const old = painted[name];
-            if (old && range) {
-                if (!spoken) {
-                    spoken = new Highlight();
-                    CSS.highlights.set("listen-spoken", spoken);
-                }
-                spoken.add(old);
-            }
-            painted[name] = range;
-            if (range) CSS.highlights.set(`listen-${name}`, new Highlight(range));
-            else CSS.highlights.delete(`listen-${name}`);
+        // Keeps the pill on its words when the page or an inner panel scrolls, or the window resizes.
+        function onViewportChange() {
+            if (layoutQueued) return;
+            layoutQueued = true;
+            requestAnimationFrame(() => {
+                layoutQueued = false;
+                layout(true);
+            });
+        }
+
+        function watchViewport(on) {
+            const method = on ? "addEventListener" : "removeEventListener";
+            window[method]("scroll", onViewportChange, { capture: true, passive: true });
+            window[method]("resize", onViewportChange);
         }
 
         // ----- Interface -----
@@ -336,41 +379,39 @@
         function prepare(range) {
             clear();
             buildTextMap(range);
-            if (!text) return "";
-            installStyles();
-            // The first word is "next" until speech starts.
-            const first = nextWordStart(0);
-            if (first >= 0) paint("next", rangeFor(first, wordEnd(first, 0)));
             return text;
         }
 
         function showWord(charIndex, charLength) {
             if (!text || charIndex >= text.length) return;
             const end = wordEnd(charIndex, charLength);
-            paint("current", rangeFor(charIndex, end));
+            const current = rangeFor(charIndex, end);
+            if (!current) return;
             const next = nextWordStart(end);
-            paint("next", next >= 0 ? rangeFor(next, wordEnd(next, 0)) : null);
+            words = { current, next: next >= 0 ? rangeFor(next, wordEnd(next, 0)) : null };
+            if (!overlay) {
+                overlay = createOverlay();
+                watchViewport(true);
+            }
+            layout(false);
         }
 
+        // Fades the pill out, then removes it. A new reading gets a fresh pill.
         function clear() {
-            paint("current", null);
-            paint("next", null);
-            if (spoken) {
-                CSS.highlights.delete("listen-spoken");
-                spoken = null;
-            }
             if (overlay) {
-                overlay.host.remove();
-                overlay = null;
+                watchViewport(false);
+                const { host, pill } = overlay;
+                pill.style.transition = `opacity ${FADE_OUT_MS}ms ease-out`;
+                pill.style.opacity = "0";
+                setTimeout(() => host.remove(), FADE_OUT_MS + 50);
             }
-            removeStyles();
+            overlay = null;
+            words = null;
+            lastTop = null;
             text = "";
             map = [];
         }
 
-        console.info(
-            `[Listen] Word highlighting uses ${supportsHighlights ? "the CSS Custom Highlight API" : "overlay boxes"}`
-        );
         return { prepare, showWord, clear };
     })();
 
