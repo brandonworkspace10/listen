@@ -148,7 +148,7 @@
 
     // ---------- Word highlighting ----------
     // Interface: highlighter.prepare(range) → text to speak; highlighter.showWord(charIndex, charLength);
-    // highlighter.clear(). Draws one rounded "pill" over the current and next word: yellow fading into
+    // highlighter.clear(); highlighter.relayout() after something scrolls. Draws one rounded "pill" over the current and next word: yellow fading into
     // orange. It lives in its own Shadow DOM overlay, so the page's DOM and layout are never touched.
 
     const highlighter = (() => {
@@ -347,7 +347,7 @@
             // keeps dark text dark; on dark pages screen keeps white text white and makes the pill glow.
             host.style.cssText =
                 "all: initial; position: absolute; left: 0; top: 0; width: 0; height: 0; " +
-                `pointer-events: none; z-index: 2147483646; mix-blend-mode: ${darkMode ? "screen" : "multiply"};`;
+                `pointer-events: none; z-index: 2147483647; mix-blend-mode: ${darkMode ? "screen" : "multiply"};`;
             const shadow = host.attachShadow({ mode: "closed" });
             const style = document.createElement("style");
             style.textContent = PILL_CSS;
@@ -474,36 +474,48 @@
             map = [];
         }
 
-        return { prepare, showWord, clear };
+        return { prepare, showWord, clear, relayout: onViewportChange };
     })();
 
     // ---------- Reading ----------
 
-    // Called when the user clicks the button.
-    function onListen() {
-        const range = selectedRange;
-        const text = selectedText;
+    let lastReadText = ""; // the page text being (or last) read, for "?" while reading
+    let readingAnswer = false; // whether the current reading is the answer in the ask panel
+
+    // Reads `range` aloud with word highlighting; `text` is the fallback if it can't be mapped.
+    function read(range, text, isAnswer) {
         speech.stop(); // end any current reading (and its highlights) before preparing the new one
         const spoken = (range && highlighter.prepare(range)) || text;
-        // Clear the blue selection so it doesn't cover the word highlights.
-        if (range) window.getSelection().removeAllRanges();
         speech.speak(spoken, {
             onWord: highlighter.showWord,
             onWordTimingUnavailable: highlighter.clear,
             onEnd: onReadingEnded,
         });
+        readingAnswer = Boolean(isAnswer);
+        if (askPanel) setAnswerSpeakIcon(readingAnswer);
         setButtonIcon("stop");
+    }
+
+    // Called when the user clicks the “ ” button.
+    function onListen() {
+        const range = selectedRange;
+        lastReadText = selectedText;
+        read(range, selectedText, false);
+        // Clear the blue selection so it doesn't cover the word highlights.
+        if (range) window.getSelection().removeAllRanges();
     }
 
     function onReadingEnded() {
         highlighter.clear();
+        readingAnswer = false;
+        if (askPanel) setAnswerSpeakIcon(false);
         setButtonIcon("listen");
         // If the selection is gone by the time reading ends, the button has nothing left to do.
         if (!readSelection()) hideBar();
     }
 
     // ---------- Floating bar (isolated in a Shadow DOM so host page CSS can't touch it) ----------
-    // A row of buttons: “ ” (listen / stop) and the speed button. More buttons can be added to the row.
+    // A row of buttons: “ ” (listen / stop), speed and "?" (ask). The ask panel opens below the row.
 
     const BUTTON_SIZE = 30;
     const OFFSET = 6;
@@ -551,12 +563,81 @@
             font: 600 13px/1 -apple-system, "Helvetica Neue", sans-serif;
             font-variant-numeric: tabular-nums;
         }
+        button.ask { padding-top: 0; font-size: 17px; }
         button:hover { transform: scale(1.08); }
         button:active { transform: scale(0.95); }
         button:focus-visible { outline: 2px solid #0a84ff; outline-offset: 2px; }
+        button:disabled { opacity: 0.4; cursor: default; transform: none; }
+
+        .panel {
+            position: absolute;
+            top: ${BUTTON_SIZE + 8}px;
+            left: 0;
+            box-sizing: border-box;
+            width: ${ASK_PANEL_WIDTH}px;
+            padding: 10px;
+            border-radius: 12px;
+            background: #ffffff;
+            color: #1c1c1e;
+            box-shadow: 0 6px 24px rgba(0, 0, 0, 0.25);
+            font: 400 14px/1.45 -apple-system, "Helvetica Neue", sans-serif;
+            text-align: left;
+        }
+        .panel.above { top: auto; bottom: ${BUTTON_SIZE + 8}px; }
+        .panel[hidden], .panel [hidden] { display: none; }
+        .ask-row { display: flex; gap: 6px; align-items: center; }
+        input {
+            all: initial;
+            flex: 1;
+            min-width: 0;
+            box-sizing: border-box;
+            height: ${BUTTON_SIZE}px;
+            padding: 0 10px;
+            border: 1px solid #d1d1d6;
+            border-radius: 8px;
+            background: #ffffff;
+            color: #1c1c1e;
+            font: 400 14px -apple-system, "Helvetica Neue", sans-serif;
+        }
+        input:focus { border-color: #0a84ff; }
+        button.send { font: 700 16px/1 -apple-system, "Helvetica Neue", sans-serif; padding-top: 0; }
+        .status { margin-top: 8px; color: #6e6e73; }
+        .status.loading::before {
+            content: "";
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            margin-right: 8px;
+            border: 2px solid #d1d1d6;
+            border-top-color: #6e6e73;
+            border-radius: 50%;
+            vertical-align: -1px;
+            animation: listen-spin 0.8s linear infinite;
+        }
+        @keyframes listen-spin { to { transform: rotate(360deg); } }
+        .status.error { color: #c62828; }
+        .answer-row { display: flex; gap: 8px; align-items: flex-start; margin-top: 8px; }
+        .answer {
+            flex: 1;
+            max-height: 240px;
+            overflow: auto;
+            white-space: pre-wrap;
+            user-select: text;
+            -webkit-user-select: text;
+        }
+        button.speak {
+            flex: none;
+            width: 24px;
+            height: 24px;
+            font-size: 14px;
+            padding-top: 4px;
+            box-shadow: none;
+        }
+        button.speak.stop { font: 400 11px/1 -apple-system, "Helvetica Neue", sans-serif; padding-top: 0; }
     `;
 
     let host = null;
+    let barShadow = null;
     let button = null; // “ ” / ■
     let speedButton = null;
     let buttonIcon = "listen";
@@ -569,6 +650,7 @@
             "all: initial; position: absolute; z-index: 2147483647; display: none;";
 
         const shadow = host.attachShadow({ mode: "closed" });
+        barShadow = shadow;
         const style = document.createElement("style");
         style.textContent = BAR_CSS;
 
@@ -600,7 +682,20 @@
             setSpeed(nextSpeed(), true);
         });
 
-        bar.append(button, speedButton);
+        const askButton = document.createElement("button");
+        askButton.type = "button";
+        askButton.className = "ask";
+        askButton.textContent = "?";
+        askButton.title = "Ask about the highlighted text";
+        askButton.setAttribute("aria-label", askButton.title);
+        askButton.addEventListener("click", (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            if (isAskOpen()) closeAsk();
+            else openAsk();
+        });
+
+        bar.append(button, speedButton, askButton);
         shadow.append(style, bar);
         document.documentElement.appendChild(host);
     }
@@ -636,7 +731,8 @@
     function hideBar() {
         selectedText = "";
         selectedRange = null;
-        // While reading, keep the bar on screen so it can stop the reading or change its speed.
+        // While reading or asking, keep the bar on screen.
+        if (isAskOpen()) return;
         if (speech.isSpeaking()) {
             setButtonIcon("stop");
             return;
@@ -693,6 +789,174 @@
         console.warn("[Listen] Speed storage unavailable:", e);
     }
 
+    // ---------- Ask panel ("?": questions about the highlighted text, answered by Gemini) ----------
+    // The question is sent to background.js, which holds the API key and calls Gemini.
+
+    const ASK_TIMEOUT_MS = 45000;
+    const ASK_PANEL_WIDTH = 320;
+
+    let askPanel = null; // { panel, input, send, status, answerRow, answer, speak }
+    let askContext = ""; // the highlighted text questions are about
+    let askRequest = 0; // id of the latest question; older answers are ignored
+
+    function createAskPanel() {
+        const panel = document.createElement("div");
+        panel.className = "panel";
+        panel.hidden = true;
+
+        const row = document.createElement("div");
+        row.className = "ask-row";
+        const input = document.createElement("input");
+        input.type = "text";
+        input.placeholder = "Ask about the highlighted text…";
+        input.setAttribute("aria-label", "Question about the highlighted text");
+        const send = document.createElement("button");
+        send.type = "button";
+        send.className = "send";
+        send.textContent = "↑";
+        send.title = "Ask";
+        send.setAttribute("aria-label", "Ask");
+        row.append(input, send);
+
+        const status = document.createElement("div");
+        status.className = "status";
+        status.hidden = true;
+
+        const answerRow = document.createElement("div");
+        answerRow.className = "answer-row";
+        answerRow.hidden = true;
+        const answer = document.createElement("div");
+        answer.className = "answer";
+        const speak = document.createElement("button");
+        speak.type = "button";
+        speak.className = "speak";
+        answerRow.append(answer, speak);
+
+        panel.append(row, status, answerRow);
+        askPanel = { panel, input, send, status, answerRow, answer, speak };
+        setAnswerSpeakIcon(false);
+
+        // Keep typing out of the page (site shortcuts) and out of our own page-level key handlers.
+        for (const type of ["keydown", "keyup", "keypress"]) {
+            panel.addEventListener(type, (event) => event.stopPropagation());
+        }
+        panel.addEventListener("keydown", (event) => {
+            if (event.key === "Escape") {
+                event.preventDefault();
+                closeAsk();
+            } else if (event.key === "Enter" && event.target === input && !event.isComposing) {
+                event.preventDefault();
+                sendQuestion();
+            }
+        });
+        send.addEventListener("click", () => sendQuestion());
+        speak.addEventListener("click", () => {
+            if (readingAnswer) speech.stop();
+            else readAnswer();
+        });
+        answer.addEventListener("scroll", () => highlighter.relayout(), { passive: true });
+        return panel;
+    }
+
+    function isAskOpen() {
+        return askPanel !== null && !askPanel.panel.hidden;
+    }
+
+    function openAsk() {
+        const context = selectedText || lastReadText;
+        if (!context || !host) return;
+        askContext = context;
+        if (!askPanel) barShadow.append(createAskPanel());
+        askRequest++;
+        askPanel.input.value = "";
+        askPanel.status.hidden = true;
+        askPanel.answerRow.hidden = true;
+        askPanel.panel.hidden = false;
+        placeAskPanel();
+        askPanel.input.focus();
+    }
+
+    function closeAsk() {
+        if (!isAskOpen()) return;
+        askRequest++; // ignore an answer still on its way
+        if (readingAnswer) speech.stop();
+        askPanel.panel.hidden = true;
+    }
+
+    // Opens below the bar, or above it if there's no room; shifted left to stay inside the window.
+    function placeAskPanel() {
+        const { panel } = askPanel;
+        panel.style.left = "0px";
+        panel.classList.remove("above");
+        const barRect = host.getBoundingClientRect();
+        const rect = panel.getBoundingClientRect();
+        const viewWidth = document.documentElement.clientWidth;
+        const viewHeight = document.documentElement.clientHeight;
+        const overflowRight = rect.right - (viewWidth - OFFSET);
+        if (overflowRight > 0) panel.style.left = `${-Math.min(overflowRight, barRect.left - OFFSET)}px`;
+        if (rect.bottom > viewHeight - OFFSET && barRect.top - rect.height - OFFSET > 0) panel.classList.add("above");
+    }
+
+    function showAskStatus(kind, message) {
+        const { status, answerRow } = askPanel;
+        status.hidden = false;
+        status.className = `status ${kind}`;
+        status.textContent = message;
+        answerRow.hidden = true;
+        placeAskPanel();
+    }
+
+    function showAnswer(text) {
+        const { status, answerRow, answer } = askPanel;
+        status.hidden = true;
+        answer.textContent = text;
+        answer.scrollTop = 0;
+        answerRow.hidden = false;
+        placeAskPanel();
+    }
+
+    async function sendQuestion() {
+        const { input, send } = askPanel;
+        const question = input.value.trim();
+        if (!question || send.disabled) return;
+        if (readingAnswer) speech.stop();
+
+        const id = ++askRequest;
+        send.disabled = true;
+        showAskStatus("loading", "Thinking…");
+        let response;
+        try {
+            const timeout = new Promise((resolve) =>
+                setTimeout(() => resolve({ ok: false, error: "No answer came back in time. Try again." }), ASK_TIMEOUT_MS)
+            );
+            const request = browser.runtime.sendMessage({ type: "listen:ask", question, text: askContext });
+            response = await Promise.race([request, timeout]);
+        } catch (e) {
+            response = { ok: false, error: "Couldn't reach Listen's background page. Reload the page and try again." };
+        }
+        send.disabled = false;
+        if (id !== askRequest) return; // closed or replaced by a newer question
+        if (!response) response = { ok: false, error: "No answer came back. Try again." };
+        if (response.ok) showAnswer(response.answer);
+        else showAskStatus("error", response.error);
+    }
+
+    function setAnswerSpeakIcon(playing) {
+        const { speak } = askPanel;
+        speak.textContent = playing ? "■" : "“”";
+        speak.classList.toggle("stop", playing);
+        speak.title = playing ? "Stop" : "Read answer aloud";
+        speak.setAttribute("aria-label", speak.title);
+    }
+
+    function readAnswer() {
+        const textNode = askPanel.answer.firstChild;
+        if (!textNode) return;
+        const range = document.createRange();
+        range.selectNodeContents(textNode);
+        read(range, textNode.data, true);
+    }
+
     // ---------- Selection ----------
 
     function isEditable(node) {
@@ -725,6 +989,7 @@
     }
 
     function updateBar() {
+        if (isAskOpen()) return; // typing a question moves the selection; keep the bar where it is
         const result = readSelection();
         if (!result) {
             hideBar();
@@ -746,8 +1011,14 @@
         setTimeout(updateBar, 0);
     });
 
+    // Hides the bar and closes the ask panel.
+    function dismiss() {
+        closeAsk();
+        hideBar();
+    }
+
     document.addEventListener("mousedown", (event) => {
-        if (!isBarEvent(event)) hideBar();
+        if (!isBarEvent(event)) dismiss();
     });
 
     // Keyboard selection (Shift + arrows, Cmd+A).
@@ -755,20 +1026,25 @@
         if (event.shiftKey || event.metaKey || event.key === "Shift") updateBar();
     });
 
-    // Escape stops any reading and hides the button.
+    // Escape closes the ask panel if it's open; otherwise it stops any reading and hides the bar.
     document.addEventListener("keydown", (event) => {
         if (event.key !== "Escape") return;
+        if (isAskOpen()) {
+            closeAsk();
+            return;
+        }
         speech.stop();
         hideBar();
     });
 
     // Hide as soon as the selection is cleared.
     document.addEventListener("selectionchange", () => {
+        if (isAskOpen()) return; // focusing the question field clears the page selection
         const selection = window.getSelection();
         if (!selection || selection.isCollapsed) hideBar();
     });
 
-    window.addEventListener("resize", hideBar);
+    window.addEventListener("resize", dismiss);
 
     // Don't keep talking after the user leaves the page.
     window.addEventListener("pagehide", () => speech.stop());
