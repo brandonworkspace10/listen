@@ -1,5 +1,5 @@
 // Listen — background page
-// Answers questions about highlighted text with Gemini. The API key lives in secrets.js (git-ignored)
+// Answers questions about highlighted text and images with Gemini. The API key lives in secrets.js (git-ignored)
 // and is only ever used here, never sent to content scripts or logged.
 
 const GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/interactions";
@@ -27,8 +27,88 @@ const INSTRUCTIONS = {
 };
 const MAX_OUTPUT_TOKENS = { ask: 400, summarize: 400, explain: 600, translate: 2048 };
 
-// Thrown for failures the user should see; `message` is shown as is.
-class AskError extends Error {}
+// The same, for questions about an image (sent along as inline image data).
+const IMAGE_INSTRUCTIONS = {
+    describe: () =>
+        "Describe the image in one or two plain sentences, as you would to someone who can't see it. No markdown.",
+    readtext: () =>
+        "Transcribe all readable text in the image, in reading order. Reply with only that text. " +
+        "If there is no readable text, say so in one short sentence.",
+    explain: () =>
+        "Explain simply, as if to a beginner, what the image shows and what it means. " +
+        "Use short, plain sentences, without markdown.",
+    ask: () =>
+        "Answer the user's question about the image briefly and clearly in plain sentences, without markdown. " +
+        "Use only what the image shows. If the image doesn't show the answer, say so.",
+};
+const IMAGE_MAX_OUTPUT_TOKENS = { describe: 300, readtext: 2048, explain: 600, ask: 400 };
+const MAX_IMAGE_SIDE = 1024; // px; larger images are scaled down before sending
+
+// Thrown for failures the user should see; `message` is shown as is. `imageUnavailable` marks an image
+// that couldn't be fetched or decoded, so the page can fall back to its alt text.
+class AskError extends Error {
+    constructor(message, imageUnavailable = false) {
+        super(message);
+        this.imageUnavailable = imageUnavailable;
+    }
+}
+
+// ----- Images -----
+
+function toBase64(buffer) {
+    const bytes = new Uint8Array(buffer);
+    let binary = "";
+    for (let i = 0; i < bytes.length; i += 0x8000) {
+        binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+    }
+    return btoa(binary);
+}
+
+async function toJpeg(bitmap, width, height) {
+    let canvas;
+    let encode;
+    if (typeof OffscreenCanvas === "function") {
+        canvas = new OffscreenCanvas(width, height);
+        encode = () => canvas.convertToBlob({ type: "image/jpeg", quality: 0.85 });
+    } else {
+        canvas = document.createElement("canvas");
+        canvas.width = width;
+        canvas.height = height;
+        encode = () => new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.85));
+    }
+    const context = canvas.getContext("2d");
+    context.fillStyle = "#ffffff"; // transparent images get a white background
+    context.fillRect(0, 0, width, height);
+    context.drawImage(bitmap, 0, 0, width, height);
+    return encode();
+}
+
+// Fetches an image, scales it to at most MAX_IMAGE_SIDE on its longest side and returns it as a
+// Gemini inline image part (JPEG, base64).
+async function loadImage(src) {
+    if (!/^(https?|data):/i.test(src)) {
+        throw new AskError("This image can't be read: it isn't a normal web image.", true);
+    }
+    let response;
+    try {
+        response = await fetch(src, { credentials: "omit" });
+    } catch (e) {
+        throw new AskError("This image can't be loaded: its website doesn't allow it to be fetched.", true);
+    }
+    if (!response.ok) throw new AskError(`This image couldn't be downloaded (error ${response.status}).`, true);
+    let bitmap;
+    try {
+        bitmap = await createImageBitmap(await response.blob());
+    } catch (e) {
+        throw new AskError("This image's format can't be read.", true);
+    }
+    const scale = Math.min(1, MAX_IMAGE_SIDE / Math.max(bitmap.width, bitmap.height));
+    const width = Math.max(1, Math.round(bitmap.width * scale));
+    const height = Math.max(1, Math.round(bitmap.height * scale));
+    const jpeg = await toJpeg(bitmap, width, height);
+    if (bitmap.close) bitmap.close();
+    return { type: "image", data: toBase64(await jpeg.arrayBuffer()), mime_type: "image/jpeg" };
+}
 
 async function loadApiKey() {
     let key = "";
@@ -56,16 +136,29 @@ function errorFor(status, body) {
     if (status >= 500) {
         return new AskError("Gemini is having trouble right now. Try again shortly.");
     }
+    if (/image/i.test(error.message || "")) {
+        return new AskError("Gemini couldn't process this image.", true);
+    }
     return new AskError(`Gemini returned an error (${status}${error.message ? `: ${error.message}` : ""}).`);
 }
 
-// action: "ask" (with question), "summarize", "explain" or "translate" (with target language name).
-async function ask(action, question, text, target) {
-    if (!INSTRUCTIONS[action]) throw new AskError("Unknown request.");
+// About text: action "ask" (with question), "summarize", "explain" or "translate" (with target language).
+// About an image (imageSrc set): "ask" (with question), "describe", "readtext" or "explain".
+async function ask(action, question, text, target, imageSrc) {
+    const instructions = imageSrc ? IMAGE_INSTRUCTIONS : INSTRUCTIONS;
+    if (!instructions[action]) throw new AskError("Unknown request.");
     if (action === "ask" && !question) throw new AskError("Type a question first.");
     const key = await loadApiKey();
-    const passage = text.length > MAX_CONTEXT_CHARS ? text.slice(0, MAX_CONTEXT_CHARS) : text;
-    const quoted = `Highlighted text:\n"""\n${passage}\n"""`;
+    let input;
+    if (imageSrc) {
+        // The docs recommend the text prompt before a single image.
+        const prompt = action === "ask" ? `Question: ${question}` : "Here is the image.";
+        input = [{ type: "text", text: prompt }, await loadImage(imageSrc)];
+    } else {
+        const passage = text.length > MAX_CONTEXT_CHARS ? text.slice(0, MAX_CONTEXT_CHARS) : text;
+        const quoted = `Highlighted text:\n"""\n${passage}\n"""`;
+        input = action === "ask" ? `${quoted}\n\nQuestion: ${question}` : quoted;
+    }
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
@@ -76,9 +169,12 @@ async function ask(action, question, text, target) {
             headers: { "x-goog-api-key": key, "Content-Type": "application/json" },
             body: JSON.stringify({
                 model: GEMINI_MODEL,
-                system_instruction: INSTRUCTIONS[action](target),
-                input: action === "ask" ? `${quoted}\n\nQuestion: ${question}` : quoted,
-                generation_config: { max_output_tokens: MAX_OUTPUT_TOKENS[action], thinking_level: "low" },
+                system_instruction: instructions[action](target),
+                input,
+                generation_config: {
+                    max_output_tokens: (imageSrc ? IMAGE_MAX_OUTPUT_TOKENS : MAX_OUTPUT_TOKENS)[action],
+                    thinking_level: "low",
+                },
             }),
             signal: controller.signal,
         });
@@ -114,12 +210,13 @@ browser.runtime.onMessage.addListener((request) => {
     // Only plain language names (e.g. "Spanish") are passed into the prompt.
     const target = String(request.target || "English").replace(/[^\p{L} -]/gu, "").slice(0, 40) || "English";
     const action = String(request.action || "ask");
-    return ask(action, String(request.question || "").trim(), String(request.text || ""), target).then(
+    const imageSrc = request.image && typeof request.image.src === "string" ? request.image.src : "";
+    return ask(action, String(request.question || "").trim(), String(request.text || ""), target, imageSrc).then(
         (answer) => ({ ok: true, answer }),
         (error) => {
             if (!(error instanceof AskError)) console.error("[Listen] Ask failed:", error);
             const message = error instanceof AskError ? error.message : "Something went wrong asking Gemini.";
-            return { ok: false, error: message };
+            return { ok: false, error: message, imageUnavailable: Boolean(error.imageUnavailable) };
         }
     );
 });

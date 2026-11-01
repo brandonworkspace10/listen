@@ -262,8 +262,10 @@
 
     // ---------- Word highlighting ----------
     // Interface: highlighter.prepare(range) → text to speak; highlighter.showWord(charIndex, charLength);
-    // highlighter.clear(); highlighter.relayout() after something scrolls. Draws one rounded "pill" over the current and next word: yellow fading into
-    // orange. It lives in its own Shadow DOM overlay, so the page's DOM and layout are never touched.
+    // highlighter.clear(); highlighter.relayout() after something scrolls; highlighter.outline(element)
+    // to frame an element (an image being read about) instead. Draws one rounded "pill" over the current
+    // and next word: yellow fading into orange. It lives in its own Shadow DOM overlay, so the page's
+    // DOM and layout are never touched.
 
     const highlighter = (() => {
         const COLORS = { current: "#ffe033", next: "#ffad33", nextClear: "rgba(255, 173, 51, 0)" };
@@ -301,7 +303,14 @@
             .pill.dark {
                 box-shadow: 0 0 10px 3px rgba(255, 190, 60, 0.6);
             }
+            /* An element being read about (an image): a soft glowing frame around it. */
+            .pill.outline {
+                border-radius: 12px;
+                background: transparent;
+                box-shadow: 0 0 0 3px rgba(255, 190, 60, 0.9), 0 0 18px 6px rgba(255, 170, 40, 0.5);
+            }
         `;
+        const OUTLINE_PAD = 4;
 
         let text = ""; // the text being spoken
         let map = []; // map[i] = { node, offset } in the page for text[i]; null for added line breaks
@@ -309,6 +318,7 @@
         let words = null; // { current: Range, next: Range | null } being shown
         let lastTop = null; // viewport top of the pill's line, to detect line changes
         let darkMode = false; // whether the text being read sits on a dark background
+        let outlined = null; // element framed by outline(), instead of the word pill
         let layoutQueued = false;
 
         // ----- Building the spoken text from the page -----
@@ -663,14 +673,16 @@
             const host = document.createElement("listen-highlight-root");
             // The pill is drawn over the text but looks like it's behind it: on light pages multiply
             // keeps dark text dark; on dark pages screen keeps white text white and makes the pill glow.
+            // An outline frames its element, so it isn't blended.
+            const blend = outlined ? "normal" : darkMode ? "screen" : "multiply";
             host.style.cssText =
                 "all: initial; position: absolute; left: 0; top: 0; width: 0; height: 0; " +
-                `pointer-events: none; z-index: 2147483647; mix-blend-mode: ${darkMode ? "screen" : "multiply"};`;
+                `pointer-events: none; z-index: 2147483647; mix-blend-mode: ${blend};`;
             const shadow = host.attachShadow({ mode: "closed" });
             const style = document.createElement("style");
             style.textContent = PILL_CSS;
             const pill = document.createElement("div");
-            pill.className = darkMode ? "pill dark" : "pill";
+            pill.className = outlined ? "pill outline" : darkMode ? "pill dark" : "pill";
             shadow.append(style, pill);
             document.documentElement.appendChild(host);
             return { host, pill };
@@ -694,6 +706,10 @@
 
         // Positions the pill over `words`. instant: move without gliding (scroll, resize, line change).
         function layout(instant) {
+            if (overlay && outlined) {
+                layoutOutline();
+                return;
+            }
             if (!overlay || !words) return;
             const cur = lineBox(words.current);
             if (!cur) return;
@@ -736,6 +752,16 @@
             lastTop = top;
         }
 
+        function layoutOutline() {
+            const rect = outlined.getBoundingClientRect();
+            const { pill } = overlay;
+            pill.style.transform =
+                `translate(${rect.left - OUTLINE_PAD + window.scrollX}px, ${rect.top - OUTLINE_PAD + window.scrollY}px)`;
+            pill.style.width = `${rect.width + 2 * OUTLINE_PAD}px`;
+            pill.style.height = `${rect.height + 2 * OUTLINE_PAD}px`;
+            pill.style.opacity = "1";
+        }
+
         // Keeps the pill on its words when the page or an inner panel scrolls, or the window resizes.
         function onViewportChange() {
             if (layoutQueued) return;
@@ -776,7 +802,17 @@
             layout(false);
         }
 
-        // Fades the pill out, then removes it. A new reading gets a fresh pill.
+        // Frames `element` (instead of the word pill) until clear().
+        function outline(element) {
+            clear();
+            outlined = element;
+            overlay = createOverlay();
+            overlay.pill.style.transition = `opacity ${FADE_IN_MS}ms ease-out`;
+            watchViewport(true);
+            layout(true);
+        }
+
+        // Fades the pill (or outline) out, then removes it. A new reading gets a fresh one.
         function clear() {
             if (overlay) {
                 watchViewport(false);
@@ -787,12 +823,13 @@
             }
             overlay = null;
             words = null;
+            outlined = null;
             lastTop = null;
             text = "";
             map = [];
         }
 
-        return { prepare, showWord, clear, relayout: onViewportChange };
+        return { prepare, showWord, clear, outline, relayout: onViewportChange };
     })();
 
     // ---------- Reading ----------
@@ -826,13 +863,24 @@
         if (range) window.getSelection().removeAllRanges();
     }
 
+    // Reads `text` about `element` (an image) aloud, framing the element instead of highlighting words.
+    function readAbout(element, text) {
+        speech.stop();
+        const lang = language.detect(null, text);
+        highlighter.outline(element);
+        speech.speak(text, { onWord() {}, onWordTimingUnavailable() {}, onEnd: onReadingEnded }, lang);
+        readingAnswer = false;
+        if (askPanel) setAnswerSpeakIcon(false);
+        setButtonIcon("stop");
+    }
+
     function onReadingEnded() {
         highlighter.clear();
         readingAnswer = false;
         if (askPanel) setAnswerSpeakIcon(false);
         setButtonIcon("listen");
-        // If the selection is gone by the time reading ends, the button has nothing left to do.
-        if (!readSelection()) hideBar();
+        // If nothing is selected or hovered by the time reading ends, the bar has nothing left to do.
+        if (!readSelection() && !(imageTarget && imageTarget.matches(":hover"))) hideBar();
     }
 
     // ---------- Floating bar (isolated in a Shadow DOM so host page CSS can't touch it) ----------
@@ -845,6 +893,7 @@
     const ICONS = {
         listen: { text: "“”", label: "Read selected text aloud", title: "Listen" },
         stop: { text: "■", label: "Stop reading", title: "Stop" },
+        loading: { text: "", label: "Describing the image. Click to cancel.", title: "Describing image…" },
     };
 
     const BAR_CSS = `
@@ -910,9 +959,11 @@
         .ask-row { display: flex; gap: 6px; align-items: center; }
         .chips { display: flex; gap: 6px; margin-bottom: 8px; }
         button.chip {
-            width: 82px;
+            width: auto;
+            min-width: 76px;
             height: 24px;
-            padding: 0;
+            padding: 0 9px;
+            white-space: nowrap;
             border-radius: 12px;
             background: #f2f2f7;
             color: #1c1c1e;
@@ -920,6 +971,31 @@
             box-shadow: none;
         }
         button.chip:hover { background: #e5e5ea; transform: none; }
+        button.loading { padding-top: 0; }
+        button.loading::after {
+            content: "";
+            box-sizing: border-box;
+            width: 14px;
+            height: 14px;
+            border: 2px solid rgba(255, 255, 255, 0.3);
+            border-top-color: #ffffff;
+            border-radius: 50%;
+            animation: listen-spin 0.8s linear infinite;
+        }
+        .note {
+            position: absolute;
+            top: ${BUTTON_SIZE + 8}px;
+            right: 0;
+            box-sizing: border-box;
+            width: ${ASK_PANEL_WIDTH}px;
+            padding: 10px;
+            border-radius: 12px;
+            background: #ffffff;
+            color: #c62828;
+            box-shadow: 0 6px 24px rgba(0, 0, 0, 0.25);
+            font: 400 13px/1.4 -apple-system, "Helvetica Neue", sans-serif;
+        }
+        .note[hidden] { display: none; }
         input {
             all: initial;
             flex: 1;
@@ -999,11 +1075,10 @@
         button.addEventListener("click", (event) => {
             event.preventDefault();
             event.stopPropagation();
-            if (buttonIcon === "stop") {
-                speech.stop();
-            } else if (selectedText) {
-                onListen();
-            }
+            if (buttonIcon === "stop") speech.stop();
+            else if (buttonIcon === "loading") cancelImageRequest();
+            else if (imageTarget) onListenImage();
+            else if (selectedText) onListen();
         });
 
         speedButton = document.createElement("button");
@@ -1020,7 +1095,7 @@
         askButton.type = "button";
         askButton.className = "ask";
         askButton.textContent = "?";
-        askButton.title = "Ask about the highlighted text";
+        askButton.title = "Ask about the highlighted text or image";
         askButton.setAttribute("aria-label", askButton.title);
         askButton.addEventListener("click", (event) => {
             event.preventDefault();
@@ -1040,6 +1115,7 @@
         button.title = icon.title;
         button.setAttribute("aria-label", icon.label);
         button.classList.toggle("stop", buttonIcon === "stop");
+        button.classList.toggle("loading", buttonIcon === "loading");
     }
 
     function setButtonIcon(name) {
@@ -1047,17 +1123,23 @@
         if (button) applyIcon();
     }
 
-    // Shows the bar just below-right of `rect` (the selection's last line), kept inside the viewport.
-    function showBar(rect) {
+    // Shows the bar just below-right of `rect` (the selection's last line), or with corner: true inside
+    // its top-right corner (an image), kept inside the viewport.
+    function showBar(rect, corner) {
         if (!host || !host.isConnected) createBar();
         host.style.display = "block";
         const width = host.offsetWidth || BUTTON_SIZE;
         const height = host.offsetHeight || BUTTON_SIZE;
         const maxX = document.documentElement.clientWidth - width - OFFSET;
         const maxY = document.documentElement.clientHeight - height - OFFSET;
-        const x = Math.min(rect.right + OFFSET, maxX);
+        let x = Math.min(rect.right + OFFSET, maxX);
         let y = rect.bottom + OFFSET;
-        if (y > maxY) y = rect.top - height - OFFSET;
+        if (corner) {
+            x = Math.min(rect.right - width - OFFSET, maxX);
+            y = Math.min(Math.max(rect.top + OFFSET, OFFSET), maxY);
+        } else if (y > maxY) {
+            y = rect.top - height - OFFSET;
+        }
         host.style.left = `${Math.max(OFFSET, x) + window.scrollX}px`;
         host.style.top = `${Math.max(OFFSET, y) + window.scrollY}px`;
     }
@@ -1065,12 +1147,14 @@
     function hideBar() {
         selectedText = "";
         selectedRange = null;
-        // While reading or asking, keep the bar on screen.
-        if (isAskOpen()) return;
+        // While reading, asking or describing an image, keep the bar on screen.
+        if (isAskOpen() || imageBusy) return;
         if (speech.isSpeaking()) {
             setButtonIcon("stop");
             return;
         }
+        imageTarget = null;
+        if (note) note.hidden = true;
         if (host) host.style.display = "none";
     }
 
@@ -1128,16 +1212,22 @@
 
     const ASK_TIMEOUT_MS = 45000;
 
-    // Quick actions: [action sent to background.js, label, tooltip].
+    // Quick actions: [action sent to background.js, label, tooltip], for text and for images.
     const CHIPS = [
         ["summarize", "Summarize", "Short summary of the highlighted text"],
         ["translate", "Translate", "Translate the highlighted text"],
         ["explain", "Explain", "Explain the highlighted text simply"],
     ];
+    const IMAGE_CHIPS = [
+        ["describe", "Describe", "Describe the image"],
+        ["readtext", "Read text in image", "Read out any text in the image"],
+        ["explain", "Explain", "Explain the image simply"],
+    ];
 
     let askPanel = null; // { panel, input, send, chips, status, answerRow, answer, speak }
     let askContext = ""; // the highlighted text questions are about
     let askRange = null; // where that text is on the page, if known
+    let askImage = null; // the image questions are about, instead of text
     let askRequest = 0; // id of the latest question; older answers are ignored
 
     // While the box is open the text it's about stays softly marked, since focusing the question
@@ -1229,16 +1319,6 @@
 
         const chips = document.createElement("div");
         chips.className = "chips";
-        const chipButtons = CHIPS.map(([action, label, title]) => {
-            const chip = document.createElement("button");
-            chip.type = "button";
-            chip.className = "chip";
-            chip.textContent = label;
-            chip.title = title;
-            chip.addEventListener("click", () => sendChip(action));
-            return chip;
-        });
-        chips.append(...chipButtons);
 
         const row = document.createElement("div");
         row.className = "ask-row";
@@ -1269,7 +1349,7 @@
         answerRow.append(answer, speak);
 
         panel.append(chips, row, status, answerRow);
-        askPanel = { panel, input, send, chips: chipButtons, status, answerRow, answer, speak };
+        askPanel = { panel, input, send, chipRow: chips, chips: [], status, answerRow, answer, speak };
         setAnswerSpeakIcon(false);
 
         // Keep typing out of the page (site shortcuts) and out of our own page-level key handlers.
@@ -1294,17 +1374,34 @@
         return panel;
     }
 
+    function renderChips(list) {
+        askPanel.chips = list.map(([action, label, title]) => {
+            const chip = document.createElement("button");
+            chip.type = "button";
+            chip.className = "chip";
+            chip.textContent = label;
+            chip.title = title;
+            chip.addEventListener("click", () => sendChip(action));
+            return chip;
+        });
+        askPanel.chipRow.replaceChildren(...askPanel.chips);
+    }
+
     function isAskOpen() {
         return askPanel !== null && !askPanel.panel.hidden;
     }
 
     function openAsk() {
         const context = selectedText || lastReadText;
-        if (!context || !host) return;
-        askContext = context;
-        askRange = selectedText ? selectedRange : lastReadRange;
+        if ((!imageTarget && !context) || !host) return;
+        askImage = imageTarget;
+        askContext = askImage ? "" : context;
+        askRange = askImage ? null : selectedText ? selectedRange : lastReadRange;
         markAsked(askRange);
         if (!askPanel) barShadow.append(createAskPanel());
+        if (note) note.hidden = true;
+        renderChips(askImage ? IMAGE_CHIPS : CHIPS);
+        askPanel.input.placeholder = askImage ? "Ask about the image…" : "Ask about the highlighted text…";
         askRequest++;
         askPanel.input.value = "";
         askPanel.status.hidden = true;
@@ -1372,7 +1469,7 @@
     }
 
     function sendChip(action) {
-        if (action !== "translate") {
+        if (action !== "translate" || askImage) {
             askGemini({ action }, "");
             return;
         }
@@ -1380,7 +1477,20 @@
         askGemini({ action, target: target.name }, target.code);
     }
 
-    // Sends `request` ({ action, question?, target? }) about askContext and shows the reply.
+    // Sends a request to background.js; always resolves to { ok, answer } or { ok: false, error }.
+    async function askBackground(request) {
+        try {
+            const timeout = new Promise((resolve) =>
+                setTimeout(() => resolve({ ok: false, error: "No answer came back in time. Try again." }), ASK_TIMEOUT_MS)
+            );
+            const response = await Promise.race([browser.runtime.sendMessage({ type: "listen:ask", ...request }), timeout]);
+            return response || { ok: false, error: "No answer came back. Try again." };
+        } catch (e) {
+            return { ok: false, error: "Couldn't reach Listen's background page. Reload the page and try again." };
+        }
+    }
+
+    // Sends `request` ({ action, question?, target? }) about askContext or askImage and shows the reply.
     async function askGemini(request, answerLang) {
         if (askPanel.send.disabled) return;
         if (readingAnswer) speech.stop();
@@ -1388,21 +1498,12 @@
         const id = ++askRequest;
         setAskBusy(true);
         showAskStatus("loading", "Thinking…");
-        let response;
-        try {
-            const timeout = new Promise((resolve) =>
-                setTimeout(() => resolve({ ok: false, error: "No answer came back in time. Try again." }), ASK_TIMEOUT_MS)
-            );
-            const message = browser.runtime.sendMessage({ type: "listen:ask", ...request, text: askContext });
-            response = await Promise.race([message, timeout]);
-        } catch (e) {
-            response = { ok: false, error: "Couldn't reach Listen's background page. Reload the page and try again." };
-        }
+        const about = askImage ? { image: imageInfo(askImage) } : { text: askContext };
+        const response = await askBackground({ ...request, ...about });
         setAskBusy(false);
         if (id !== askRequest) return; // closed or replaced by a newer question
-        if (!response) response = { ok: false, error: "No answer came back. Try again." };
         if (response.ok) showAnswer(response.answer, answerLang);
-        else showAskStatus("error", response.error);
+        else showAskStatus("error", withAltText(response));
     }
 
     function setAnswerSpeakIcon(playing) {
@@ -1420,6 +1521,144 @@
         range.selectNodeContents(textNode);
         read(range, textNode.data, true);
     }
+
+    // ---------- Images ----------
+    // Hovering a content image shows the bar in its top-right corner. “ ” reads its alt text, or asks
+    // Gemini (through background.js) to describe it; "?" asks about it.
+
+    const IMAGE_MIN_SIZE = 80;
+    const IMAGE_HOVER_DELAY_MS = 400;
+    const IMAGE_LEAVE_DELAY_MS = 250;
+    const NOTE_MS = 6000;
+
+    let imageTarget = null; // the image the bar is for, or null when it's for selected text
+    let imageBusy = false; // waiting for a description
+    let imageRequest = 0; // id of the latest description request
+    let hoverTimer = null;
+    let leaveTimer = null;
+    let note = null; // short message under the bar (e.g. an image that can't be fetched)
+    let noteTimer = null;
+
+    // Big enough, visible, not decorative, and not a logo inside a link.
+    function isReadableImage(img) {
+        const rect = img.getBoundingClientRect();
+        if (rect.width < IMAGE_MIN_SIZE || rect.height < IMAGE_MIN_SIZE) return false;
+        if (img.getAttribute("role") === "presentation" || img.closest("[aria-hidden='true']")) return false;
+        if (isEditable(img)) return false;
+        const link = img.closest("a");
+        if (link) {
+            const hints = [img.alt, img.currentSrc || img.src, img.className, img.id, link.className, link.id].join(" ");
+            if (/logo/i.test(hints)) return false;
+        }
+        return true;
+    }
+
+    // Alt text worth reading: not empty, not a file name, not a placeholder like "image" or "IMG_1234".
+    function isMeaningfulAlt(alt) {
+        const text = alt.trim();
+        if (!text) return false;
+        if (/\.(png|jpe?g|gif|webp|svg|bmp|tiff?|avif|heic)$/i.test(text)) return false;
+        if (/^(image|img|photo|picture|graphic|icon|thumbnail|untitled)\s*\d*$/i.test(text)) return false;
+        if (!/\s/.test(text) && /^(img|dsc|pxl|screenshot)[_\-]?\d/i.test(text)) return false;
+        return true;
+    }
+
+    function imageInfo(img) {
+        return { src: img.currentSrc || img.src, alt: (img.getAttribute("alt") || "").trim() };
+    }
+
+    // An error message, plus the image's alt text when the image itself couldn't be fetched.
+    function withAltText(response) {
+        const alt = askImage ? imageInfo(askImage).alt : "";
+        return response.imageUnavailable && alt ? `${response.error} Its alt text says: “${alt}”` : response.error;
+    }
+
+    function showNote(message) {
+        if (!note) {
+            note = document.createElement("div");
+            note.className = "note";
+            barShadow.append(note);
+        }
+        note.textContent = message;
+        note.hidden = false;
+        clearTimeout(noteTimer);
+        noteTimer = setTimeout(() => (note.hidden = true), NOTE_MS);
+    }
+
+    function showImageBar(img) {
+        selectedText = "";
+        selectedRange = null;
+        imageTarget = img;
+        setButtonIcon("listen");
+        showBar(img.getBoundingClientRect(), true);
+    }
+
+    function hideImageBar() {
+        if (!imageTarget || imageBusy || speech.isSpeaking() || isAskOpen()) return;
+        hideBar();
+    }
+
+    async function onListenImage() {
+        const img = imageTarget;
+        const { alt } = imageInfo(img);
+        if (isMeaningfulAlt(alt)) {
+            readAbout(img, alt);
+            return;
+        }
+        const id = ++imageRequest;
+        imageBusy = true;
+        setButtonIcon("loading");
+        const response = await askBackground({ action: "describe", image: imageInfo(img) });
+        if (id !== imageRequest) return; // cancelled
+        imageBusy = false;
+        if (response.ok) {
+            readAbout(img, response.answer);
+            return;
+        }
+        setButtonIcon("listen");
+        const fallBack = response.imageUnavailable && alt;
+        showNote(fallBack ? `${response.error} Reading its alt text instead.` : response.error);
+        if (fallBack) readAbout(img, alt);
+    }
+
+    function cancelImageRequest() {
+        imageRequest++;
+        imageBusy = false;
+        setButtonIcon("listen");
+    }
+
+    // Show the bar after the pointer rests on an image; hide it once the pointer leaves image and bar.
+    document.addEventListener(
+        "mouseover",
+        (event) => {
+            if (isBarEvent(event) || event.target === imageTarget) {
+                clearTimeout(leaveTimer);
+                return;
+            }
+            const img = event.target;
+            if (!img || img.tagName !== "IMG") return;
+            if (selectedText || speech.isSpeaking() || isAskOpen() || imageBusy) return;
+            if (!isReadableImage(img)) return;
+            clearTimeout(hoverTimer);
+            hoverTimer = setTimeout(() => {
+                if (img.matches(":hover") && !selectedText && !speech.isSpeaking() && !isAskOpen()) showImageBar(img);
+            }, IMAGE_HOVER_DELAY_MS);
+        },
+        true
+    );
+
+    document.addEventListener(
+        "mouseout",
+        (event) => {
+            if (event.target && event.target.tagName === "IMG") clearTimeout(hoverTimer);
+            if (!imageTarget) return;
+            const to = event.relatedTarget;
+            if (to && (to === imageTarget || to === host)) return;
+            clearTimeout(leaveTimer);
+            leaveTimer = setTimeout(hideImageBar, IMAGE_LEAVE_DELAY_MS);
+        },
+        true
+    );
 
     // ---------- Selection ----------
 
@@ -1464,6 +1703,7 @@
         if (result.text !== selectedText) setButtonIcon("listen");
         selectedText = result.text;
         selectedRange = result.range;
+        imageTarget = null; // a text selection takes the bar over from an image
         language.prepare(result.text);
         showBar(result.rect);
     }
