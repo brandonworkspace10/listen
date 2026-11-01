@@ -1227,7 +1227,8 @@
     let askPanel = null; // { panel, input, send, chips, status, answerRow, answer, speak }
     let askContext = ""; // the highlighted text questions are about
     let askRange = null; // where that text is on the page, if known
-    let askImage = null; // the image questions are about, instead of text
+    let askImage = null; // the image or chart questions are about, instead of text
+    let askKind = "image"; // "image" or "chart"
     let askRequest = 0; // id of the latest question; older answers are ignored
 
     // While the box is open the text it's about stays softly marked, since focusing the question
@@ -1395,13 +1396,16 @@
         const context = selectedText || lastReadText;
         if ((!imageTarget && !context) || !host) return;
         askImage = imageTarget;
+        askKind = imageKind;
         askContext = askImage ? "" : context;
         askRange = askImage ? null : selectedText ? selectedRange : lastReadRange;
         markAsked(askRange);
         if (!askPanel) barShadow.append(createAskPanel());
         if (note) note.hidden = true;
-        renderChips(askImage ? IMAGE_CHIPS : CHIPS);
-        askPanel.input.placeholder = askImage ? "Ask about the image…" : "Ask about the highlighted text…";
+        renderChips(!askImage ? CHIPS : askKind === "chart" ? CHART_CHIPS : IMAGE_CHIPS);
+        askPanel.input.placeholder = !askImage
+            ? "Ask about the highlighted text…"
+            : askKind === "chart" ? "Ask about the chart…" : "Ask about the image…";
         askRequest++;
         askPanel.input.value = "";
         askPanel.status.hidden = true;
@@ -1498,7 +1502,16 @@
         const id = ++askRequest;
         setAskBusy(true);
         showAskStatus("loading", "Thinking…");
-        const about = askImage ? { image: imageInfo(askImage) } : { text: askContext };
+        let about;
+        try {
+            if (!askImage) about = { text: askContext };
+            else if (askKind === "chart") about = { chart: await chartInfo(askImage) };
+            else about = { image: imageInfo(askImage) };
+        } catch (error) {
+            setAskBusy(false);
+            if (id === askRequest) showAskStatus("error", error instanceof CaptureError ? error.message : "This chart couldn't be captured.");
+            return;
+        }
         const response = await askBackground({ ...request, ...about });
         setAskBusy(false);
         if (id !== askRequest) return; // closed or replaced by a newer question
@@ -1531,7 +1544,8 @@
     const IMAGE_LEAVE_DELAY_MS = 250;
     const NOTE_MS = 6000;
 
-    let imageTarget = null; // the image the bar is for, or null when it's for selected text
+    let imageTarget = null; // the image or chart the bar is for, or null when it's for selected text
+    let imageKind = "image"; // "image" or "chart"
     let imageBusy = false; // waiting for a description
     let imageRequest = 0; // id of the latest description request
     let hoverTimer = null;
@@ -1569,7 +1583,7 @@
 
     // An error message, plus the image's alt text when the image itself couldn't be fetched.
     function withAltText(response) {
-        const alt = askImage ? imageInfo(askImage).alt : "";
+        const alt = askImage && askImage.tagName === "IMG" ? imageInfo(askImage).alt : "";
         return response.imageUnavailable && alt ? `${response.error} Its alt text says: “${alt}”` : response.error;
     }
 
@@ -1585,10 +1599,11 @@
         noteTimer = setTimeout(() => (note.hidden = true), NOTE_MS);
     }
 
-    function showImageBar(img) {
+    function showImageBar(img, kind = "image") {
         selectedText = "";
         selectedRange = null;
         imageTarget = img;
+        imageKind = kind;
         setButtonIcon("listen");
         showBar(img.getBoundingClientRect(), true);
     }
@@ -1599,6 +1614,10 @@
     }
 
     async function onListenImage() {
+        if (imageKind === "chart") {
+            onListenChart(imageTarget);
+            return;
+        }
         const img = imageTarget;
         const { alt } = imageInfo(img);
         if (isMeaningfulAlt(alt)) {
@@ -1627,21 +1646,27 @@
         setButtonIcon("listen");
     }
 
-    // Show the bar after the pointer rests on an image; hide it once the pointer leaves image and bar.
+    // Show the bar after the pointer rests on an image or chart (see Charts); hide it once the pointer
+    // leaves both it and the bar.
     document.addEventListener(
         "mouseover",
         (event) => {
-            if (isBarEvent(event) || event.target === imageTarget) {
+            if (isBarEvent(event)) {
                 clearTimeout(leaveTimer);
                 return;
             }
-            const img = event.target;
-            if (!img || img.tagName !== "IMG") return;
+            const found = visualTargetFor(event.target);
+            if (found && found.el === imageTarget) {
+                clearTimeout(leaveTimer);
+                return;
+            }
+            if (!found) return;
             if (selectedText || speech.isSpeaking() || isAskOpen() || imageBusy) return;
-            if (!isReadableImage(img)) return;
             clearTimeout(hoverTimer);
             hoverTimer = setTimeout(() => {
-                if (img.matches(":hover") && !selectedText && !speech.isSpeaking() && !isAskOpen()) showImageBar(img);
+                if (found.el.matches(":hover") && !selectedText && !speech.isSpeaking() && !isAskOpen()) {
+                    showImageBar(found.el, found.kind);
+                }
             }, IMAGE_HOVER_DELAY_MS);
         },
         true
@@ -1650,15 +1675,185 @@
     document.addEventListener(
         "mouseout",
         (event) => {
-            if (event.target && event.target.tagName === "IMG") clearTimeout(hoverTimer);
+            clearTimeout(hoverTimer);
             if (!imageTarget) return;
             const to = event.relatedTarget;
-            if (to && (to === imageTarget || to === host)) return;
+            if (to && (to === imageTarget || to === host || imageTarget.contains(to))) return;
             clearTimeout(leaveTimer);
             leaveTimer = setTimeout(hideImageBar, IMAGE_LEAVE_DELAY_MS);
         },
         true
     );
+
+    // ---------- Charts ----------
+    // Charts and graphs get the same hover bar as images: chart-like images, and large <canvas> or <svg>
+    // elements. “ ” asks Gemini to describe what the chart shows; "?" offers Describe / Key numbers /
+    // Explain. Canvas and svg charts exist only on the page, so they're captured here as a PNG (svg also
+    // sends its text labels); background.js sends everything to Gemini.
+
+    const CHART_MIN_WIDTH = 150;
+    const CHART_MIN_HEIGHT = 100;
+    const MAX_CAPTURE_SIDE = 1024;
+    const MAX_LABEL_CHARS = 4000;
+    const CHART_HINTS = /\b(chart|graph|plot|diagram|histogram|pie|trend|timeline|statistics?|infographic)\b/i;
+    // Computed styles copied into a captured svg, since the page's stylesheets don't come along.
+    const SVG_STYLE_PROPS = [
+        "fill", "fill-opacity", "stroke", "stroke-width", "stroke-opacity", "stroke-dasharray", "opacity",
+        "font-family", "font-size", "font-weight", "text-anchor", "dominant-baseline", "visibility", "display",
+    ];
+    const CHART_CHIPS = [
+        ["describe", "Describe", "Describe what the chart shows"],
+        ["keynumbers", "Key numbers", "The chart's most important numbers"],
+        ["explain", "Explain", "Explain the chart simply"],
+    ];
+
+    // A chart that can't be captured; `message` is shown to the user.
+    class CaptureError extends Error {}
+
+    function bigEnoughForChart(el) {
+        const rect = el.getBoundingClientRect();
+        return rect.width >= CHART_MIN_WIDTH && rect.height >= CHART_MIN_HEIGHT;
+    }
+
+    function captionOf(el) {
+        const figure = el.closest("figure");
+        const caption = figure && figure.querySelector("figcaption");
+        return caption ? caption.textContent.replace(/\s+/g, " ").trim().slice(0, 500) : "";
+    }
+
+    // An image whose alt text, file name or caption mentions a chart, or a large vector diagram
+    // (Wikipedia serves those as ".svg.png").
+    function looksLikeChartImage(img) {
+        const src = img.currentSrc || img.src || "";
+        const hints = [img.alt, img.title, src, img.className, captionOf(img)].join(" ").replace(/[_-]/g, " ");
+        if (CHART_HINTS.test(hints)) return true;
+        return /\.svg(\.png)?([?#]|$)/i.test(src) && bigEnoughForChart(img);
+    }
+
+    function outermostSvg(node) {
+        let svg = node.closest && node.closest("svg");
+        while (svg && svg.parentElement && svg.parentElement.closest("svg")) svg = svg.parentElement.closest("svg");
+        return svg;
+    }
+
+    // Large, not a decorative icon or a link's logo, and actually drawing something.
+    function isChartSvg(svg) {
+        if (!bigEnoughForChart(svg) || svg.closest("a") || svg.closest("[aria-hidden='true']")) return false;
+        return svg.querySelectorAll("path, rect, line, circle, polyline, polygon").length >= 3;
+    }
+
+    // The image, chart image, canvas chart or svg chart under the pointer, as { el, kind }, or null.
+    function visualTargetFor(node) {
+        if (!node || node.nodeType !== Node.ELEMENT_NODE) return null;
+        if (node.tagName === "IMG") {
+            if (!isReadableImage(node)) return null;
+            return { el: node, kind: looksLikeChartImage(node) ? "chart" : "image" };
+        }
+        if (node.tagName === "CANVAS") {
+            return bigEnoughForChart(node) && !node.closest("[aria-hidden='true']") ? { el: node, kind: "chart" } : null;
+        }
+        const svg = outermostSvg(node);
+        return svg && isChartSvg(svg) ? { el: svg, kind: "chart" } : null;
+    }
+
+    function isBlank(pixels) {
+        for (let i = 0; i < pixels.length; i += 16) {
+            if (pixels[i] < 250 || pixels[i + 1] < 250 || pixels[i + 2] < 250) return false;
+        }
+        return true;
+    }
+
+    // Draws `source` (a canvas or image) on white, at most MAX_CAPTURE_SIDE wide or tall, as a PNG part.
+    function imagePartFrom(source, width, height) {
+        const scale = Math.min(1, MAX_CAPTURE_SIDE / Math.max(width, height));
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.max(1, Math.round(width * scale));
+        canvas.height = Math.max(1, Math.round(height * scale));
+        const context = canvas.getContext("2d");
+        context.fillStyle = "#ffffff";
+        context.fillRect(0, 0, canvas.width, canvas.height);
+        context.drawImage(source, 0, 0, canvas.width, canvas.height);
+        let pixels;
+        try {
+            pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+        } catch (e) {
+            throw new CaptureError(
+                "This chart can't be captured: it uses pictures from another website, so Safari blocks copying it."
+            );
+        }
+        if (isBlank(pixels)) throw new CaptureError("This chart couldn't be captured: the copy came out blank.");
+        return { data: canvas.toDataURL("image/png").split(",")[1], mime_type: "image/png" };
+    }
+
+    function loadPicture(url) {
+        return new Promise((resolve, reject) => {
+            const img = new Image();
+            img.onload = () => resolve(img);
+            img.onerror = () => reject(new CaptureError("This chart couldn't be captured: the page didn't allow copying it."));
+            img.src = url;
+        });
+    }
+
+    // Renders an svg chart to a PNG part, with the page's computed styles copied in.
+    async function svgImagePart(svg) {
+        const rect = svg.getBoundingClientRect();
+        const clone = svg.cloneNode(true);
+        const sources = [svg, ...svg.querySelectorAll("*")];
+        const copies = [clone, ...clone.querySelectorAll("*")];
+        sources.forEach((source, i) => {
+            const style = getComputedStyle(source);
+            copies[i].setAttribute("style", SVG_STYLE_PROPS.map((p) => `${p}:${style.getPropertyValue(p)}`).join(";"));
+        });
+        clone.setAttribute("width", String(rect.width));
+        clone.setAttribute("height", String(rect.height));
+        const markup = new XMLSerializer().serializeToString(clone);
+        const picture = await loadPicture(`data:image/svg+xml;charset=utf-8,${encodeURIComponent(markup)}`);
+        return imagePartFrom(picture, rect.width * 2, rect.height * 2); // 2x keeps small labels sharp
+    }
+
+    function svgLabels(svg) {
+        const texts = [...svg.querySelectorAll("title, desc, text")]
+            .map((el) => el.textContent.replace(/\s+/g, " ").trim())
+            .filter(Boolean);
+        const label = svg.getAttribute("aria-label");
+        if (label) texts.unshift(label);
+        return [...new Set(texts)].join(" | ").slice(0, MAX_LABEL_CHARS);
+    }
+
+    // What background.js needs to see a chart: { src } for an image, or a captured { data, mime_type },
+    // plus any text labels and caption. Throws CaptureError when a canvas or svg can't be copied.
+    async function chartInfo(el) {
+        const caption = captionOf(el);
+        if (el.tagName === "IMG") return { ...imageInfo(el), caption };
+        if (el.tagName === "CANVAS") {
+            const labels = [el.getAttribute("aria-label"), el.title, el.textContent.trim()].filter(Boolean).join(" | ");
+            return { ...imagePartFrom(el, el.width, el.height), labels: labels.slice(0, MAX_LABEL_CHARS), caption };
+        }
+        return { ...(await svgImagePart(el)), labels: svgLabels(el), caption };
+    }
+
+    async function onListenChart(el) {
+        const id = ++imageRequest;
+        imageBusy = true;
+        setButtonIcon("loading");
+        let response;
+        try {
+            response = await askBackground({ action: "describe", chart: await chartInfo(el) });
+        } catch (error) {
+            response = { ok: false, error: error instanceof CaptureError ? error.message : "This chart couldn't be captured." };
+        }
+        if (id !== imageRequest) return; // cancelled
+        imageBusy = false;
+        if (response.ok) {
+            readAbout(el, response.answer);
+            return;
+        }
+        setButtonIcon("listen");
+        const alt = el.tagName === "IMG" ? imageInfo(el).alt : "";
+        const fallBack = response.imageUnavailable && alt;
+        showNote(fallBack ? `${response.error} Reading its alt text instead.` : response.error);
+        if (fallBack) readAbout(el, alt);
+    }
 
     // ---------- Selection ----------
 

@@ -1,5 +1,5 @@
 // Listen — background page
-// Answers questions about highlighted text and images with Gemini. The API key lives in secrets.js (git-ignored)
+// Answers questions about highlighted text, images and charts with Gemini. The API key lives in secrets.js (git-ignored)
 // and is only ever used here, never sent to content scripts or logged.
 
 const GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/interactions";
@@ -43,6 +43,28 @@ const IMAGE_INSTRUCTIONS = {
 };
 const IMAGE_MAX_OUTPUT_TOKENS = { describe: 300, readtext: 2048, explain: 600, ask: 400 };
 const MAX_IMAGE_SIDE = 1024; // px; larger images are scaled down before sending
+
+// The same, for charts and graphs: a chart image to fetch, or a canvas/svg chart the page captured.
+const CHART_INSTRUCTIONS = {
+    describe: () =>
+        "This image is a chart or graph. In two to four plain sentences, say what it shows: its title, what the " +
+        "axes or categories measure, the main trend, and the highest and lowest values with their labels. " +
+        "Use only what is visible and the labels provided. No markdown. " +
+        "If it isn't actually a chart, describe what it shows in one or two sentences instead.",
+    keynumbers: () =>
+        "This image is a chart or graph. List its key numbers: the highest and lowest values, any totals or " +
+        "averages shown, and other notable figures, each with what it refers to. Use short plain sentences, " +
+        "without markdown, and only what the chart shows.",
+    explain: () =>
+        "This image is a chart or graph. Explain simply, as if to a beginner, what it shows and what it means. " +
+        "Use short, plain sentences, without markdown.",
+    ask: () =>
+        "This image is a chart or graph. Answer the user's question about it briefly and clearly in plain " +
+        "sentences, without markdown. Use only what the chart shows. If it doesn't show the answer, say so.",
+};
+const CHART_MAX_OUTPUT_TOKENS = { describe: 400, keynumbers: 600, explain: 600, ask: 400 };
+const MAX_CAPTURED_IMAGE_CHARS = 12 * 1024 * 1024; // base64 of a captured chart (well under Gemini's 20 MB)
+const MAX_CHART_TEXT_CHARS = 4000;
 
 // Thrown for failures the user should see; `message` is shown as is. `imageUnavailable` marks an image
 // that couldn't be fetched or decoded, so the page can fall back to its alt text.
@@ -142,18 +164,41 @@ function errorFor(status, body) {
     return new AskError(`Gemini returned an error (${status}${error.message ? `: ${error.message}` : ""}).`);
 }
 
+// A chart as a Gemini image part: captured by the page ({ data, mime_type }) or fetched ({ src }).
+async function chartImagePart(chart) {
+    if (typeof chart.data === "string" && chart.data) {
+        if (!["image/png", "image/jpeg"].includes(chart.mime_type) || chart.data.length > MAX_CAPTURED_IMAGE_CHARS) {
+            throw new AskError("This chart's picture is too large or in an unexpected format.");
+        }
+        return { type: "image", data: chart.data, mime_type: chart.mime_type };
+    }
+    if (typeof chart.src === "string" && chart.src) return loadImage(chart.src);
+    throw new AskError("No chart picture was sent.");
+}
+
 // About text: action "ask" (with question), "summarize", "explain" or "translate" (with target language).
-// About an image (imageSrc set): "ask" (with question), "describe", "readtext" or "explain".
-async function ask(action, question, text, target, imageSrc) {
-    const instructions = imageSrc ? IMAGE_INSTRUCTIONS : INSTRUCTIONS;
+// About an image (image.src): "ask", "describe", "readtext" or "explain".
+// About a chart (chart: { src } or { data, mime_type }, plus labels and caption): "ask", "describe",
+// "keynumbers" or "explain".
+async function ask({ action, question, text, target, image, chart }) {
+    const instructions = chart ? CHART_INSTRUCTIONS : image ? IMAGE_INSTRUCTIONS : INSTRUCTIONS;
     if (!instructions[action]) throw new AskError("Unknown request.");
     if (action === "ask" && !question) throw new AskError("Type a question first.");
     const key = await loadApiKey();
     let input;
-    if (imageSrc) {
+    if (chart) {
+        // The docs recommend the text prompt before a single image. Labels found in an svg chart and
+        // the chart's caption help with small or overlapping text.
+        let prompt = action === "ask" ? `Question: ${question}` : "Here is the chart.";
+        const labels = String(chart.labels || "").slice(0, MAX_CHART_TEXT_CHARS);
+        const caption = String(chart.caption || "").slice(0, MAX_CHART_TEXT_CHARS);
+        if (labels) prompt += `\n\nText labels found in the chart: ${labels}`;
+        if (caption) prompt += `\n\nThe chart's caption: ${caption}`;
+        input = [{ type: "text", text: prompt }, await chartImagePart(chart)];
+    } else if (image) {
         // The docs recommend the text prompt before a single image.
         const prompt = action === "ask" ? `Question: ${question}` : "Here is the image.";
-        input = [{ type: "text", text: prompt }, await loadImage(imageSrc)];
+        input = [{ type: "text", text: prompt }, await loadImage(image.src)];
     } else {
         const passage = text.length > MAX_CONTEXT_CHARS ? text.slice(0, MAX_CONTEXT_CHARS) : text;
         const quoted = `Highlighted text:\n"""\n${passage}\n"""`;
@@ -172,7 +217,7 @@ async function ask(action, question, text, target, imageSrc) {
                 system_instruction: instructions[action](target),
                 input,
                 generation_config: {
-                    max_output_tokens: (imageSrc ? IMAGE_MAX_OUTPUT_TOKENS : MAX_OUTPUT_TOKENS)[action],
+                    max_output_tokens: (chart ? CHART_MAX_OUTPUT_TOKENS : image ? IMAGE_MAX_OUTPUT_TOKENS : MAX_OUTPUT_TOKENS)[action],
                     thinking_level: "low",
                 },
             }),
@@ -209,9 +254,16 @@ browser.runtime.onMessage.addListener((request) => {
     if (!request || request.type !== "listen:ask") return;
     // Only plain language names (e.g. "Spanish") are passed into the prompt.
     const target = String(request.target || "English").replace(/[^\p{L} -]/gu, "").slice(0, 40) || "English";
-    const action = String(request.action || "ask");
-    const imageSrc = request.image && typeof request.image.src === "string" ? request.image.src : "";
-    return ask(action, String(request.question || "").trim(), String(request.text || ""), target, imageSrc).then(
+    const image = request.image && typeof request.image.src === "string" ? { src: request.image.src } : null;
+    const chart = request.chart && typeof request.chart === "object" ? request.chart : null;
+    return ask({
+        action: String(request.action || "ask"),
+        question: String(request.question || "").trim(),
+        text: String(request.text || ""),
+        target,
+        image,
+        chart,
+    }).then(
         (answer) => ({ ok: true, answer }),
         (error) => {
             if (!(error instanceof AskError)) console.error("[Listen] Ask failed:", error);
