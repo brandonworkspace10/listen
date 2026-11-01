@@ -6,10 +6,11 @@
     "use strict";
 
     // ---------- Speech (swap this section out for a better voice later) ----------
-    // Interface: speech.speak(text, { onWord, onWordTimingUnavailable, onEnd }), speech.stop(),
-    // speech.isSpeaking(), speech.setRate(rate). onWord(charIndex, charLength) gives the position in
-    // `text` of the word being spoken (charLength may be 0); onEnd fires once when reading finishes
-    // or is stopped.
+    // Interface: speech.speak(text, { onWord, onWordTimingUnavailable, onEnd }, lang), speech.stop(),
+    // speech.isSpeaking(), speech.setRate(rate). `lang` is a BCP 47 tag ("es", "pt-BR"); the best
+    // installed voice for it is used, or English if there is none. onWord(charIndex, charLength)
+    // gives the position in `text` of the word being spoken (charLength may be 0); onEnd fires once
+    // when reading finishes or is stopped.
 
     const speech = (() => {
         // Novelty voices macOS ships alongside the real ones; never pick these.
@@ -24,16 +25,21 @@
             "Rocko", "Sandy", "Shelley",
         ]);
 
-        let bestVoice = null;
-        let current = null; // { utterance, onEnd }
+        let current = null; // the reading in progress; see speak()
 
         // "Eddy (English (US))" → "Eddy"
         function baseName(voice) {
             return voice.name.replace(/\s*\(.*\)$/, "");
         }
 
-        // Higher is better: Premium > Enhanced > Siri > system default > other English > low quality.
-        function rank(voice) {
+        // "pt_BR" / "PT-br" → "pt-br"
+        function normalizeLang(lang) {
+            return lang.replace("_", "-").toLowerCase();
+        }
+
+        // Higher is better: Premium > Enhanced > Siri > system default > other > low quality.
+        // Within a tier, prefer the exact region asked for, then the user's own region.
+        function rank(voice, lang) {
             const id = `${voice.name} ${voice.voiceURI}`.toLowerCase();
             let score = 0;
             if (id.includes("premium")) score = 4;
@@ -41,30 +47,26 @@
             else if (id.includes("siri")) score = 2;
             else if (voice.default) score = 1;
             else if (LOW_QUALITY_VOICES.has(baseName(voice))) score = -1;
-            // Within a tier, prefer the user's own English variant (e.g. en-GB), then en-US.
-            const lang = voice.lang.replace("_", "-").toLowerCase();
-            if (lang === navigator.language.toLowerCase()) score += 0.2;
-            else if (lang === "en-us") score += 0.1;
+            const voiceLang = normalizeLang(voice.lang);
+            if (voiceLang === normalizeLang(lang)) score += 0.2;
+            else if (voiceLang === normalizeLang(navigator.language)) score += 0.15;
+            else if (voiceLang === "en-us") score += 0.1;
             return score;
         }
 
-        function pickBestVoice() {
-            const english = window.speechSynthesis
+        // Best installed voice for `lang` ("es", "es-MX"), or null if no voice speaks that language.
+        function pickVoice(lang) {
+            const primary = normalizeLang(lang).split("-")[0];
+            const voices = window.speechSynthesis
                 .getVoices()
-                .filter((v) => v.lang && v.lang.toLowerCase().startsWith("en"))
+                .filter((v) => v.lang && normalizeLang(v.lang).split("-")[0] === primary)
                 .filter((v) => !NOVELTY_VOICES.has(baseName(v)));
-            if (english.length === 0) return null;
-            const best = english.reduce((a, b) => (rank(b) > rank(a) ? b : a));
-            if (best !== bestVoice) {
-                console.info(`[Listen] Using voice: ${best.name} (${best.lang}, ${best.voiceURI})`);
-            }
-            return best;
+            if (voices.length === 0) return null;
+            return voices.reduce((a, b) => (rank(b, lang) > rank(a, lang) ? b : a));
         }
 
-        // Safari can load the voice list after the page starts.
-        window.speechSynthesis.addEventListener("voiceschanged", () => {
-            bestVoice = pickBestVoice();
-        });
+        // Safari loads the voice list lazily; ask for it early so it's ready by the first click.
+        window.speechSynthesis.getVoices();
 
         // How long after speech starts to wait for the first word position before giving up on it.
         const WORD_TIMING_GRACE_MS = 2000;
@@ -83,8 +85,8 @@
         // relative to the whole text, so a restart mid-text keeps the highlight in sync.
         function startUtterance(entry, from) {
             const utterance = new SpeechSynthesisUtterance(entry.text.slice(from));
-            if (bestVoice) utterance.voice = bestVoice;
-            utterance.lang = bestVoice ? bestVoice.lang : "en-US";
+            if (entry.voice) utterance.voice = entry.voice;
+            utterance.lang = entry.voice ? entry.voice.lang : entry.lang;
             utterance.rate = rate;
 
             // Events from an utterance replaced by a speed change are ignored.
@@ -103,7 +105,7 @@
                 if (entry.sawWord || entry.wordTimingCheck) return;
                 entry.wordTimingCheck = setTimeout(() => {
                     if (current !== entry || entry.sawWord) return;
-                    const name = bestVoice ? bestVoice.name : "This voice";
+                    const name = entry.voice ? entry.voice.name : "This voice";
                     console.info(`[Listen] ${name} doesn't report word positions, so words won't be highlighted.`);
                     entry.callbacks.onWordTimingUnavailable();
                 }, WORD_TIMING_GRACE_MS);
@@ -113,10 +115,18 @@
             window.speechSynthesis.speak(utterance);
         }
 
-        function speak(text, callbacks) {
+        function speak(text, callbacks, lang = "en") {
             stop();
-            bestVoice = pickBestVoice() || bestVoice;
-            const entry = { text, callbacks, utterance: null, wordStart: 0, sawWord: false, wordTimingCheck: null };
+            let voice = pickVoice(lang);
+            if (!voice && normalizeLang(lang).split("-")[0] !== "en") {
+                console.info(`[Listen] No installed voice for "${lang}"; falling back to English.`);
+                lang = "en";
+                voice = pickVoice(lang);
+            }
+            console.info(`[Listen] Detected language: ${lang}, voice: ${voice ? `${voice.name} (${voice.lang})` : "system default"}`);
+            const entry = {
+                text, callbacks, lang, voice, utterance: null, wordStart: 0, sawWord: false, wordTimingCheck: null,
+            };
             current = entry;
             startUtterance(entry, 0);
         }
@@ -144,6 +154,110 @@
         }
 
         return { speak, stop, isSpeaking, setRate };
+    })();
+
+    // ---------- Language ----------
+    // Interface: language.prepare(text) starts the text check early (when text is selected), since
+    // browser.i18n.detectLanguage is asynchronous and speech must start inside the click;
+    // language.detect(range, text) → BCP 47 tag, decided synchronously when reading starts.
+
+    const language = (() => {
+        const canDetect =
+            typeof browser !== "undefined" && browser.i18n && typeof browser.i18n.detectLanguage === "function";
+        const results = new Map(); // text → { lang, reliable } from browser.i18n.detectLanguage, or null while pending
+        const MAX_CACHED = 20;
+
+        // Writing systems that identify a language on their own (checked in order).
+        const SCRIPTS = [
+            ["ko", /\p{Script=Hangul}/u],
+            ["ja", /[\p{Script=Hiragana}\p{Script=Katakana}]/u],
+            ["zh", /\p{Script=Han}/u],
+            ["ru", /\p{Script=Cyrillic}/u],
+            ["el", /\p{Script=Greek}/u],
+            ["ar", /\p{Script=Arabic}/u],
+            ["he", /\p{Script=Hebrew}/u],
+            ["th", /\p{Script=Thai}/u],
+            ["hi", /\p{Script=Devanagari}/u],
+        ];
+
+        // Common short words that tell Latin-script languages apart.
+        const COMMON_WORDS = {
+            en: "the and is of to in that it with for this was are on you have be not",
+            es: "el la los las de que y en un una es por con para del se no su al lo como más",
+            fr: "le la les des et est un une du que en pour dans pas qui sur au avec ce il",
+            de: "der die das und ist nicht ein eine zu den mit sich des auf für im dem von auch",
+            it: "il lo la gli di che e è un una per non con del della sono nel anche si",
+            pt: "o a os as de que e é um uma do da em para não com por se mais dos",
+            nl: "de het een en van is dat niet op te voor met zijn ook aan maar",
+        };
+        const WORD_SETS = Object.fromEntries(
+            Object.entries(COMMON_WORDS).map(([lang, words]) => [lang, new Set(words.split(" "))])
+        );
+
+        // Lightweight check: a dominant non-Latin script, or clearly more common words of one language.
+        function quickGuess(text) {
+            const letters = [...text].filter((c) => /\p{L}/u.test(c));
+            if (letters.length === 0) return null;
+            for (const [lang, pattern] of SCRIPTS) {
+                if (letters.filter((c) => pattern.test(c)).length / letters.length > 0.3) return lang;
+            }
+            const words = text.toLowerCase().match(/\p{L}+/gu) || [];
+            const scores = Object.entries(WORD_SETS)
+                .map(([lang, set]) => [lang, words.filter((w) => set.has(w)).length])
+                .sort((a, b) => b[1] - a[1]);
+            const [[best, bestScore], [, secondScore]] = scores;
+            return bestScore >= 3 && bestScore >= secondScore * 1.5 ? best : null;
+        }
+
+        function prepare(text) {
+            if (!canDetect || !text || results.has(text)) return;
+            results.set(text, null);
+            if (results.size > MAX_CACHED) results.delete(results.keys().next().value);
+            browser.i18n.detectLanguage(text.slice(0, 2000)).then(
+                (result) => {
+                    const top = result && result.languages && result.languages[0];
+                    results.set(text, top ? { lang: top.language, reliable: Boolean(result.isReliable) } : { lang: "und" });
+                },
+                () => results.set(text, { lang: "und" })
+            );
+        }
+
+        // Nearest lang attribute around the text, else the page's.
+        function fromAttribute(range) {
+            const node = range && range.startContainer;
+            const el = node && (node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement);
+            const tagged = el && el.closest("[lang]");
+            return ((tagged && tagged.getAttribute("lang")) || document.documentElement.lang || "").trim();
+        }
+
+        // The language the text itself is in, or null if unsure.
+        function fromText(text) {
+            const result = results.get(text);
+            if (result && result.reliable && result.lang !== "und") {
+                return { lang: result.lang, how: "browser.i18n.detectLanguage" };
+            }
+            const guess = quickGuess(text);
+            return guess ? { lang: guess, how: "word check" } : null;
+        }
+
+        function detect(range, text) {
+            const attribute = fromAttribute(range);
+            const textual = fromText(text);
+            const primary = (lang) => lang.toLowerCase().split(/[-_]/)[0];
+            let lang;
+            if (textual && (!attribute || primary(attribute) !== primary(textual.lang))) {
+                lang = textual.lang; // the text wins when they disagree
+            } else {
+                lang = attribute || (textual && textual.lang) || "en";
+            }
+            console.info(
+                `[Listen] Language check: lang attribute "${attribute || "none"}", ` +
+                `text ${textual ? `"${textual.lang}" (${textual.how})` : "unsure"} → ${lang}`
+            );
+            return lang;
+        }
+
+        return { prepare, detect };
     })();
 
     // ---------- Word highlighting ----------
@@ -485,12 +599,13 @@
     // Reads `range` aloud with word highlighting; `text` is the fallback if it can't be mapped.
     function read(range, text, isAnswer) {
         speech.stop(); // end any current reading (and its highlights) before preparing the new one
+        const lang = language.detect(range, text);
         const spoken = (range && highlighter.prepare(range)) || text;
-        speech.speak(spoken, {
-            onWord: highlighter.showWord,
-            onWordTimingUnavailable: highlighter.clear,
-            onEnd: onReadingEnded,
-        });
+        speech.speak(
+            spoken,
+            { onWord: highlighter.showWord, onWordTimingUnavailable: highlighter.clear, onEnd: onReadingEnded },
+            lang
+        );
         readingAnswer = Boolean(isAnswer);
         if (askPanel) setAnswerSpeakIcon(readingAnswer);
         setButtonIcon("stop");
@@ -911,6 +1026,7 @@
         status.hidden = true;
         answer.textContent = text;
         answer.scrollTop = 0;
+        language.prepare(text);
         answerRow.hidden = false;
         placeAskPanel();
     }
@@ -1000,6 +1116,7 @@
         if (result.text !== selectedText) setButtonIcon("listen");
         selectedText = result.text;
         selectedRange = result.range;
+        language.prepare(result.text);
         showBar(result.rect);
     }
 
