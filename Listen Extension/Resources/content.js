@@ -206,14 +206,65 @@
             return samples;
         }
 
+        // One AudioContext for the page, unlocked inside the user's click (Safari only plays
+        // Web Audio from a context started by a gesture) and kept alive between readings.
+        let audioContext = null;
+
+        function unlockAudio() {
+            if (!audioContext || audioContext.state === "closed") {
+                audioContext = new AudioContext();
+                const context = audioContext;
+                context.onstatechange = () => console.info("[Listen] AudioContext state changed:", context.state);
+            }
+            const context = audioContext;
+            context.resume().then(
+                () => console.info("[Listen] AudioContext resumed:", context.state),
+                (error) => console.warn("[Listen] AudioContext resume failed:", error)
+            );
+            // Playing a tiny silent sound during the click fully unlocks audio in Safari.
+            const silence = context.createBufferSource();
+            silence.buffer = context.createBuffer(1, 1, context.sampleRate);
+            silence.connect(context.destination);
+            silence.start();
+            console.info(
+                `[Listen] AudioContext unlocked in click: state=${context.state}, sampleRate=${context.sampleRate}`
+            );
+            return context;
+        }
+
+        async function ensureRunning(context) {
+            if (context.state === "running") return;
+            console.warn(`[Listen] AudioContext is "${context.state}"; trying to resume`);
+            await Promise.race([context.resume().catch(() => {}), new Promise((r) => setTimeout(r, 1000))]);
+            if (context.state !== "running") {
+                throw new Error(`AudioContext is "${context.state}" (Safari blocked audio)`);
+            }
+        }
+
         function playSamples(entry, samples, sampleRate) {
-            return new Promise((resolve) => {
-                const buffer = entry.context.createBuffer(1, samples.length, sampleRate);
+            const context = entry.context;
+            return new Promise((resolve, reject) => {
+                const buffer = context.createBuffer(1, samples.length, sampleRate);
                 buffer.copyToChannel(samples, 0);
-                const source = entry.context.createBufferSource();
+                const source = context.createBufferSource();
                 source.buffer = buffer;
-                source.connect(entry.context.destination);
+                source.connect(context.destination);
+                const startedAt = context.currentTime;
+
+                // If the sound never finishes, fail with the reason instead of hanging.
+                entry.watchdog = setTimeout(() => {
+                    source.onended = null;
+                    try { source.stop(); } catch (e) {}
+                    entry.source = null;
+                    const advanced = (context.currentTime - startedAt).toFixed(2);
+                    reject(new Error(
+                        `audio did not finish (AudioContext "${context.state}", clock advanced ` +
+                        `${advanced} s of ${buffer.duration.toFixed(2)} s)`
+                    ));
+                }, buffer.duration * 1000 + 3000);
+
                 source.onended = () => {
+                    clearTimeout(entry.watchdog);
                     entry.source = null;
                     resolve();
                 };
@@ -232,62 +283,76 @@
             if (current !== entry) return;
             current = null;
             clearTimeout(entry.timer);
+            clearTimeout(entry.watchdog);
             if (entry.source) {
                 entry.source.onended = null;
                 try { entry.source.stop(); } catch (e) {}
             }
-            entry.context.close().catch(() => {});
+            // The AudioContext stays open so later readings keep their unlocked audio.
             engine.release();
             entry.callbacks.onEnd();
         }
 
+        // Must be called synchronously from the click handler so the audio unlock counts as a gesture.
         // callbacks.onFail(remainingText) is called instead of onEnd if Kokoro can't continue.
         async function speak(text, callbacks) {
             stop();
+            const context = unlockAudio();
 
-            // Create the audio context during the click so Safari allows playback.
-            const context = new AudioContext();
-            context.resume().catch(() => {});
-
-            const entry = { context, callbacks, source: null, timer: null };
+            const entry = { context, callbacks, source: null, timer: null, watchdog: null };
             current = entry;
             const isCurrent = () => current === entry;
 
             let segments = [{ text, pause: 0 }];
             let index = 0;
+            let step = "loading the voice";
             try {
                 await load(isCurrent);
                 if (!isCurrent()) return;
-                // If Safari blocked audio, fall back instead of waiting on audio that never plays.
-                if (context.state !== "running") {
-                    await Promise.race([context.resume(), new Promise((r) => setTimeout(r, 1000))]);
-                    if (context.state !== "running") throw new Error("Audio playback is blocked");
-                }
+
+                step = "checking audio";
+                await ensureRunning(context);
                 if (!isCurrent()) return;
-                console.info("[Listen] Reading with the Kokoro voice");
+
+                step = "splitting the text";
                 segments = await splitIntoSegments(text);
                 if (!isCurrent()) return;
+                console.info(`[Listen] Reading with the Kokoro voice: ${segments.length} piece(s)`);
 
                 const request = (i) =>
                     i < segments.length ? send({ type: "listen:generate", text: segments[i].text }) : null;
 
                 let next = request(0);
                 for (index = 0; index < segments.length; index++) {
+                    const piece = `piece ${index + 1}/${segments.length}`;
+                    step = `generating ${piece}`;
                     const { audio, sampleRate } = await next;
                     if (!isCurrent()) return;
                     next = request(index + 1); // prepare the next piece while this one plays
                     if (next) next.catch(() => {}); // handled when awaited
 
+                    step = `playing ${piece}`;
+                    await ensureRunning(context);
+                    const samples = decodePcm16(audio);
+                    console.info(
+                        `[Listen] Playing ${piece}: ${(samples.length / sampleRate).toFixed(1)} s, ` +
+                        `AudioContext ${context.state}, clock ${context.currentTime.toFixed(2)} s`
+                    );
                     if (index === 0) callbacks.onPlaying();
-                    await playSamples(entry, decodePcm16(audio), sampleRate);
+                    await playSamples(entry, samples, sampleRate);
                     if (!isCurrent()) return;
                     if (index < segments.length - 1) await wait(entry, segments[index].pause);
                     if (!isCurrent()) return;
                 }
+                console.info("[Listen] Finished reading with the Kokoro voice");
                 finish(entry);
             } catch (error) {
                 if (!isCurrent()) return;
-                console.warn("[Listen] Kokoro voice failed, using the built-in voice:", error);
+                const reason = (error && error.message) || String(error);
+                console.warn(
+                    `[Listen] Kokoro voice failed while ${step}: ${reason} ` +
+                    `(AudioContext ${context.state}). Using the built-in voice.`
+                );
                 const remaining = segments.slice(index).map((s) => s.text).join(" ");
                 // Hand over without calling onEnd, so the reading continues seamlessly.
                 entry.callbacks = { onEnd() {} };
