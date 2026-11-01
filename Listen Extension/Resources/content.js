@@ -58,14 +58,104 @@
         return { speak, stop, isSpeaking: () => current !== null };
     })();
 
+    // Connection to the voice engine in the background page. Uses one long-lived port so the
+    // background stays awake, and guarantees every request settles: a reply, a disconnect, or a timeout.
+    const engine = (() => {
+        const DISCONNECTED = "Voice engine disconnected";
+        const LOAD_TIMEOUT = 10 * 60 * 1000; // first download can be slow
+        const REQUEST_TIMEOUT = 60 * 1000;
+        const PING_INTERVAL = 10 * 1000;
+
+        let port = null;
+        let pingTimer = null;
+        let nextId = 1;
+        const pending = new Map(); // id → { resolve, reject, timer }
+
+        function rejectAll(message) {
+            for (const entry of pending.values()) {
+                clearTimeout(entry.timer);
+                entry.reject(new Error(message));
+            }
+            pending.clear();
+        }
+
+        function closePort() {
+            clearInterval(pingTimer);
+            pingTimer = null;
+            port = null;
+        }
+
+        function onMessage(message) {
+            if (message.type === "listen:progress") {
+                console.info(`[Listen] Downloading voice (${message.file}): ${message.percent}%`);
+                return;
+            }
+            const entry = pending.get(message.id);
+            if (!entry) return;
+            pending.delete(message.id);
+            clearTimeout(entry.timer);
+            if (message.ok) entry.resolve(message);
+            else entry.reject(new Error(message.error || "Voice engine error"));
+        }
+
+        function connect() {
+            port = browser.runtime.connect({ name: "listen-engine" });
+            port.onMessage.addListener(onMessage);
+            port.onDisconnect.addListener(() => {
+                closePort();
+                rejectAll(DISCONNECTED);
+            });
+            pingTimer = setInterval(() => {
+                try { port.postMessage({ type: "listen:ping" }); } catch (e) {}
+            }, PING_INTERVAL);
+        }
+
+        function request(message) {
+            return new Promise((resolve, reject) => {
+                const id = nextId++;
+                const timeout = message.type === "listen:load" ? LOAD_TIMEOUT : REQUEST_TIMEOUT;
+                const timer = setTimeout(() => {
+                    pending.delete(id);
+                    reject(new Error(`Voice engine timed out (${message.type})`));
+                }, timeout);
+                pending.set(id, { resolve, reject, timer });
+                try {
+                    if (!port) connect();
+                    port.postMessage({ ...message, id });
+                } catch (error) {
+                    pending.delete(id);
+                    clearTimeout(timer);
+                    reject(error);
+                }
+            });
+        }
+
+        // Called when a reading ends, so the background page can go idle.
+        function release() {
+            const old = port;
+            closePort();
+            rejectAll("Released");
+            try { if (old) old.disconnect(); } catch (e) {}
+        }
+
+        return { request, release, DISCONNECTED };
+    })();
+
     // Kokoro voice. The model runs in the background page; audio plays here with Web Audio.
     const kokoroVoice = (() => {
         let current = null; // see speak()
 
-        async function send(message) {
-            const response = await browser.runtime.sendMessage(message);
-            if (!response || !response.ok) throw new Error((response && response.error) || "No response");
-            return response;
+        const send = (message) => engine.request(message);
+
+        // Loads the model, retrying once if Safari unloaded the background page mid-load.
+        async function load(isCurrent) {
+            try {
+                await send({ type: "listen:load" });
+            } catch (error) {
+                if (!isCurrent() || error.message !== engine.DISCONNECTED) throw error;
+                console.warn("[Listen] Voice engine restarted while loading; retrying once.");
+                await send({ type: "listen:load" });
+            }
         }
 
         // Splits text into [{ text, pause }] using line breaks for headings/paragraphs and
@@ -147,7 +237,7 @@
                 try { entry.source.stop(); } catch (e) {}
             }
             entry.context.close().catch(() => {});
-            try { entry.port.disconnect(); } catch (e) {}
+            engine.release();
             entry.callbacks.onEnd();
         }
 
@@ -159,18 +249,22 @@
             const context = new AudioContext();
             context.resume().catch(() => {});
 
-            let port = null;
-            try { port = browser.runtime.connect({ name: "listen-keepalive" }); } catch (e) {}
-
-            const entry = { context, port, callbacks, source: null, timer: null };
+            const entry = { context, callbacks, source: null, timer: null };
             current = entry;
             const isCurrent = () => current === entry;
 
             let segments = [{ text, pause: 0 }];
             let index = 0;
             try {
-                await send({ type: "listen:load" });
+                await load(isCurrent);
                 if (!isCurrent()) return;
+                // If Safari blocked audio, fall back instead of waiting on audio that never plays.
+                if (context.state !== "running") {
+                    await Promise.race([context.resume(), new Promise((r) => setTimeout(r, 1000))]);
+                    if (context.state !== "running") throw new Error("Audio playback is blocked");
+                }
+                if (!isCurrent()) return;
+                console.info("[Listen] Reading with the Kokoro voice");
                 segments = await splitIntoSegments(text);
                 if (!isCurrent()) return;
 
