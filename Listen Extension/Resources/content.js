@@ -134,6 +134,7 @@
         const GLIDE_MS = 160;
         const FADE_IN_MS = 150;
         const FADE_OUT_MS = 500;
+        const DARK_OPACITY = "0.6"; // dark pages: a softer glow so white text stays readable
         const SKIPPED_TAGS = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE", "TEXTAREA", "SELECT"]);
 
         // Layer 1: solid orange under the next word. Layer 2: transparent→orange blend. Base: yellow.
@@ -157,6 +158,10 @@
                 transition-duration: ${GLIDE_MS}ms, ${GLIDE_MS}ms, ${GLIDE_MS}ms, ${GLIDE_MS}ms, ${GLIDE_MS}ms, ${FADE_IN_MS}ms;
                 transition-timing-function: ease-out;
             }
+            /* Dark pages: a soft neon glow around the pill. */
+            .pill.dark {
+                box-shadow: 0 0 10px 3px rgba(255, 190, 60, 0.6);
+            }
         `;
 
         let text = ""; // the text being spoken
@@ -164,6 +169,7 @@
         let overlay = null; // { host, pill } for the current reading
         let words = null; // { current: Range, next: Range | null } being shown
         let lastTop = null; // viewport top of the pill's line, to detect line changes
+        let darkMode = false; // whether the text being read sits on a dark background
         let layoutQueued = false;
 
         // ----- Building the spoken text from the page -----
@@ -280,19 +286,48 @@
             }
         }
 
+        // ----- Page background -----
+
+        // "rgb(r, g, b)" / "rgba(r, g, b, a)" → { r, g, b, a }; null for anything else.
+        function parseColor(value) {
+            const match = value.match(/rgba?\(([^)]+)\)/);
+            if (!match) return null;
+            const [r, g, b, a = 1] = match[1].split(/[\s,/]+/).filter(Boolean).map(Number);
+            return { r, g, b, a };
+        }
+
+        // Perceived brightness, 0 (black) to 1 (white).
+        function brightness({ r, g, b }) {
+            return (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+        }
+
+        // Uses the first non-transparent background colour going up from the selection. If no element has
+        // one, the page canvas shows through, so fall back to the text colour (light text → dark page).
+        function isDarkBackground(range) {
+            let el = range.commonAncestorContainer;
+            if (el.nodeType !== Node.ELEMENT_NODE) el = el.parentElement;
+            const textColor = el ? parseColor(getComputedStyle(el).color) : null;
+            for (; el; el = el.parentElement) {
+                const background = parseColor(getComputedStyle(el).backgroundColor);
+                if (background && background.a >= 0.5) return brightness(background) < 0.5;
+            }
+            return textColor ? brightness(textColor) > 0.6 : false;
+        }
+
         // ----- Drawing the pill -----
 
         function createOverlay() {
             const host = document.createElement("listen-highlight-root");
-            // Multiply blending lets the page's text show through, so the pill looks like it's behind it.
+            // The pill is drawn over the text but looks like it's behind it: on light pages multiply
+            // keeps dark text dark; on dark pages screen keeps white text white and makes the pill glow.
             host.style.cssText =
                 "all: initial; position: absolute; left: 0; top: 0; width: 0; height: 0; " +
-                "pointer-events: none; z-index: 2147483646; mix-blend-mode: multiply;";
+                `pointer-events: none; z-index: 2147483646; mix-blend-mode: ${darkMode ? "screen" : "multiply"};`;
             const shadow = host.attachShadow({ mode: "closed" });
             const style = document.createElement("style");
             style.textContent = PILL_CSS;
             const pill = document.createElement("div");
-            pill.className = "pill";
+            pill.className = darkMode ? "pill dark" : "pill";
             shadow.append(style, pill);
             document.documentElement.appendChild(host);
             return { host, pill };
@@ -349,7 +384,7 @@
             pill.style.height = `${bottom - top}px`;
             pill.style.backgroundPosition = `${blendTo}px 0, ${blendFrom}px 0`;
             pill.style.backgroundSize = `${width - blendTo}px 100%, ${blendTo - blendFrom}px 100%`;
-            pill.style.opacity = "1";
+            pill.style.opacity = darkMode ? DARK_OPACITY : "1";
 
             if (jump) {
                 void pill.offsetWidth; // apply the jump before glides are re-enabled
@@ -379,6 +414,8 @@
         function prepare(range) {
             clear();
             buildTextMap(range);
+            darkMode = isDarkBackground(range);
+            console.info(`[Listen] Highlight mode: ${darkMode ? "dark" : "light"}`);
             return text;
         }
 
