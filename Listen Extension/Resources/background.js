@@ -2,6 +2,7 @@
 // Runs the Kokoro voice engine. Content scripts connect with a port named "listen-engine"
 // and send requests ({ id, type, ... }); every request gets exactly one reply ({ id, ok, ... }).
 
+import "./polyfills.js"; // must come before kokoro.web.js
 import { KokoroTTS, TextSplitterStream, env } from "./kokoro.web.js";
 
 const MODEL_ID = "onnx-community/Kokoro-82M-v1.0-ONNX";
@@ -50,7 +51,10 @@ function loadVoice() {
             device: "wasm",
             progress_callback: onProgress,
         }).then(
-            (tts) => {
+            async (tts) => {
+                console.info(`[Listen] Kokoro model loaded in ${Math.round(performance.now() - started)} ms; warming up`);
+                // The first generation is much slower in Safari; do it here so the first real sentence isn't.
+                await tts.generate("Ready.", { voice: VOICE });
                 console.info(`[Listen] Kokoro voice ready in ${Math.round(performance.now() - started)} ms`);
                 return tts;
             },

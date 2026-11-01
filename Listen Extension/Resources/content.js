@@ -63,7 +63,7 @@
     const engine = (() => {
         const DISCONNECTED = "Voice engine disconnected";
         const LOAD_TIMEOUT = 10 * 60 * 1000; // first download can be slow
-        const REQUEST_TIMEOUT = 60 * 1000;
+        const REQUEST_TIMEOUT = 3 * 60 * 1000; // Safari can take tens of seconds per sentence
         const PING_INTERVAL = 10 * 1000;
 
         let port = null;
