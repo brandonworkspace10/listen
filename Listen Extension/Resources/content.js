@@ -515,6 +515,28 @@
         }));
     }
 
+    // Rendered equations big enough to be worth a hover bar (not every inline "x").
+    function isHoverableMath(container) {
+        const rect = mathOutlineTarget(container).getBoundingClientRect();
+        return rect.width >= 60 && rect.height >= 12;
+    }
+
+    // Reads one hovered or clicked equation, outlining it; asks Gemini first if its MathML isn't enough.
+    async function onListenMath(container) {
+        const entry = localMath(container);
+        if (!entry.local.complete && entry.helped === undefined) {
+            const id = ++imageRequest;
+            imageBusy = true;
+            setButtonIcon("loading");
+            showNote("Working out how to say the maths…", "info");
+            await prepareMath([container]);
+            if (id !== imageRequest) return; // cancelled
+            imageBusy = false;
+            if (note) note.hidden = true;
+        }
+        readAbout(mathOutlineTarget(container), mathSpeech(container));
+    }
+
     // The selection as text for Gemini, with each equation replaced by its TeX (or spoken form).
     function mathContext(range) {
         const fragment = range.cloneContents();
@@ -1829,8 +1851,9 @@
 
     function sendChip(action) {
         if (action === "readit") {
-            // Read the selected maths aloud with Listen's own spoken form (no Gemini needed).
-            if (askRange) read(askRange, askContext, false);
+            // Read the maths aloud with Listen's own spoken form (no Gemini needed).
+            if (askImage && askKind === "math") onListenMath(askImage);
+            else if (askRange) read(askRange, askContext, false);
             return;
         }
         if (action !== "translate" || askImage) {
@@ -1865,7 +1888,10 @@
         let about;
         try {
             if (askKind === "code") about = { code: { text: askContext, language: codeLanguage(askCode) } };
-            else if (askKind === "math") about = { math: { text: askRange ? mathContext(askRange) : askContext } };
+            else if (askKind === "math") {
+                const text = askImage ? texOf(askImage) || mathSpeech(askImage) : askRange ? mathContext(askRange) : askContext;
+                about = { math: { text } };
+            }
             else if (!askImage) about = { text: askContext };
             else if (askKind === "chart") about = { chart: await chartInfo(askImage) };
             else about = { image: imageInfo(askImage) };
@@ -1969,7 +1995,8 @@
         imageTarget = img;
         imageKind = kind;
         setButtonIcon("listen");
-        showBar(img.getBoundingClientRect(), true);
+        if (kind === "math") showBar(mathOutlineTarget(img).getBoundingClientRect(), false);
+        else showBar(img.getBoundingClientRect(), true);
     }
 
     function hideImageBar() {
@@ -1980,6 +2007,10 @@
     async function onListenImage() {
         if (imageKind === "chart") {
             onListenChart(imageTarget);
+            return;
+        }
+        if (imageKind === "math") {
+            onListenMath(imageTarget);
             return;
         }
         const img = imageTarget;
@@ -2111,6 +2142,8 @@
     // The image, chart image, canvas chart or svg chart under the pointer, as { el, kind }, or null.
     function visualTargetFor(node) {
         if (!node || node.nodeType !== Node.ELEMENT_NODE) return null;
+        const math = mathContainerOf(node);
+        if (math) return isHoverableMath(math) ? { el: math, kind: "math" } : null;
         if (node.tagName === "IMG") {
             if (!isReadableImage(node)) return null;
             return { el: node, kind: looksLikeChartImage(node) ? "chart" : "image" };
@@ -2320,13 +2353,17 @@
         const selection = window.getSelection();
         if (!selection || selection.isCollapsed || selection.rangeCount === 0) return null;
 
-        const text = selection.toString().trim();
+        const range = selection.getRangeAt(0);
+        let text = selection.toString().trim();
+        // Equations drawn as MathML or images select as empty text; use their spoken form (see Maths).
+        const maths = text ? [] : mathContainersIn(range);
+        if (!text && maths.length) text = maths.map(mathSpeech).join(" ");
         if (!text) return null;
         if (isEditable(selection.anchorNode) || isEditable(selection.focusNode)) return null;
 
-        const range = selection.getRangeAt(0);
-        const rects = range.getClientRects();
-        const rect = rects[rects.length - 1];
+        const rects = [...range.getClientRects()].filter((r) => r.width || r.height);
+        let rect = rects[rects.length - 1];
+        if (!rect && maths.length) rect = mathOutlineTarget(maths[maths.length - 1]).getBoundingClientRect();
         if (!rect) return null;
 
         return { text, range: range.cloneRange(), rect, codeBlock: codeBlockFor(range, text) };
@@ -2356,7 +2393,13 @@
         if (isBarEvent(event)) return;
         lastPointer = { x: event.clientX, y: event.clientY };
         // Wait a tick so the browser finishes updating the selection.
-        setTimeout(updateBar, 0);
+        setTimeout(() => {
+            updateBar();
+            // A click (no selection) on a rendered equation shows its bar, like hovering it.
+            if (selectedText || speech.isSpeaking() || isAskOpen()) return;
+            const found = visualTargetFor(event.target);
+            if (found && found.kind === "math") showImageBar(found.el, "math");
+        }, 0);
     });
 
     // Hides the bar and closes the ask panel.
