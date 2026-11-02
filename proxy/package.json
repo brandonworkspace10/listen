@@ -1,0 +1,5 @@
+{
+    "name": "listen-proxy",
+    "private": true,
+    "type": "module"
+}

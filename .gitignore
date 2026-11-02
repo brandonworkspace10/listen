@@ -11,3 +11,7 @@ build/
 
 # Local secrets (API keys) — never commit
 Listen Extension/Resources/secrets.js
+
+# Vercel (proxy/): local settings and env files with keys — never commit
+.vercel/
+.env*
