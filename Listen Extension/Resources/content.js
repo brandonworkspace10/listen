@@ -1,5 +1,5 @@
 // Listen — content script
-// The “ ” button reads the selected text aloud with the best installed built-in voice,
+// The speaker button reads the selected text aloud with the best installed built-in voice,
 // highlighting each word on the page as it's spoken.
 
 (() => {
@@ -1194,7 +1194,7 @@
 
     // ---------- Reading ----------
 
-    let lastReadText = ""; // the page text being (or last) read, for "?" while reading
+    let lastReadText = ""; // the page text being (or last) read, for the chat box while reading
     let lastReadRange = null;
     let readingAnswer = false; // whether the current reading is the answer in the ask panel
 
@@ -1224,7 +1224,7 @@
         setButtonIcon("stop");
     }
 
-    // Called when the user clicks the “ ” button.
+    // Called when the user clicks the speaker button.
     function onListen() {
         const range = selectedRange;
         const codeBlock = selectedCodeBlock;
@@ -1260,17 +1260,48 @@
     }
 
     // ---------- Floating bar (isolated in a Shadow DOM so host page CSS can't touch it) ----------
-    // A row of buttons: “ ” (listen / stop), speed and "?" (ask). The ask panel opens below the row.
+    // A row of buttons: speaker (listen / stop), speed and chat (ask). The ask panel opens below the row.
 
     const BUTTON_SIZE = 30;
     const OFFSET = 6;
     const ASK_PANEL_WIDTH = 320;
 
     const ICONS = {
-        listen: { text: "“”", label: "Read selected text aloud", title: "Listen" },
+        listen: { svg: "speaker", label: "Read selected text aloud", title: "Listen" },
         stop: { text: "■", label: "Stop reading", title: "Stop" },
         loading: { text: "", label: "Describing the image. Click to cancel.", title: "Describing image…" },
     };
+
+    // Line icons (24×24 grid), drawn in the button's text colour.
+    const SVG_NS = "http://www.w3.org/2000/svg";
+    const SVG_SHAPES = {
+        speaker: [
+            ["path", { d: "M11 5 6 9H3v6h3l5 4z", fill: "currentColor" }],
+            ["path", { d: "M15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9.2 9.2 0 0 1 0 13" }],
+        ],
+        chat: [["path", { d: "M20 11.5a7.5 7.5 0 0 1-11.2 6.5L4 19.5l1.5-4.3A7.5 7.5 0 1 1 20 11.5z" }]],
+        copy: [
+            ["rect", { x: "9", y: "9", width: "11", height: "11", rx: "2" }],
+            ["path", { d: "M5 15V6a2 2 0 0 1 2-2h8" }],
+        ],
+        check: [["path", { d: "M5 12.5l4.5 4.5L19 7.5" }]],
+    };
+
+    // Built with DOM calls rather than innerHTML, which pages using Trusted Types (Gmail) refuse.
+    function svgIcon(name, size) {
+        const svg = document.createElementNS(SVG_NS, "svg");
+        const attrs = {
+            viewBox: "0 0 24 24", width: size, height: size, fill: "none", stroke: "currentColor",
+            "stroke-width": "2", "stroke-linecap": "round", "stroke-linejoin": "round", "aria-hidden": "true",
+        };
+        for (const [key, value] of Object.entries(attrs)) svg.setAttribute(key, String(value));
+        for (const [tag, shapeAttrs] of SVG_SHAPES[name]) {
+            const shape = document.createElementNS(SVG_NS, tag);
+            for (const [key, value] of Object.entries(shapeAttrs)) shape.setAttribute(key, value);
+            svg.append(shape);
+        }
+        return svg;
+    }
 
     const BAR_CSS = `
         :host { all: initial; }
@@ -1290,18 +1321,14 @@
             border-radius: 50%;
             background: #1c1c1e;
             color: #ffffff;
-            font: 700 18px/1 Georgia, "Times New Roman", serif;
-            padding-top: 6px;
+            font: 400 14px/1 -apple-system, "Helvetica Neue", sans-serif;
             cursor: pointer;
             box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
             user-select: none;
             -webkit-user-select: none;
             transition: transform 0.1s ease;
         }
-        button.stop {
-            font: 400 14px/1 -apple-system, "Helvetica Neue", sans-serif;
-            padding-top: 0;
-        }
+        button svg { display: block; flex: none; }
         /* Fixed width (fits "1.25x") so the button doesn't move under the pointer as the label changes. */
         button.speed {
             width: 54px;
@@ -1310,7 +1337,6 @@
             font: 600 13px/1 -apple-system, "Helvetica Neue", sans-serif;
             font-variant-numeric: tabular-nums;
         }
-        button.ask { padding-top: 0; font-size: 17px; }
         button:hover { transform: scale(1.08); }
         button:active { transform: scale(0.95); }
         button:focus-visible { outline: 2px solid #0a84ff; outline-offset: 2px; }
@@ -1336,8 +1362,8 @@
         .ask-row { display: flex; gap: 6px; align-items: center; }
         .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
         button.chip {
+            flex: 1 0 auto;
             width: auto;
-            min-width: 76px;
             height: 24px;
             padding: 0 9px;
             white-space: nowrap;
@@ -1348,7 +1374,6 @@
             box-shadow: none;
         }
         button.chip:hover { background: #e5e5ea; transform: none; }
-        button.loading { padding-top: 0; }
         button.loading::after {
             content: "";
             box-sizing: border-box;
@@ -1388,7 +1413,7 @@
             font: 400 14px -apple-system, "Helvetica Neue", sans-serif;
         }
         input:focus { border-color: #0a84ff; }
-        button.send { font: 700 16px/1 -apple-system, "Helvetica Neue", sans-serif; padding-top: 0; }
+        button.send { font: 700 16px/1 -apple-system, "Helvetica Neue", sans-serif; }
         .status { margin-top: 8px; color: #6e6e73; }
         .status.loading::before {
             content: "";
@@ -1413,20 +1438,30 @@
             user-select: text;
             -webkit-user-select: text;
         }
-        button.speak {
-            flex: none;
+        .answer-tools { position: relative; flex: none; display: flex; flex-direction: column; gap: 6px; }
+        button.speak, button.copy {
             width: 24px;
             height: 24px;
-            font-size: 14px;
-            padding-top: 4px;
             box-shadow: none;
         }
-        button.speak.stop { font: 400 11px/1 -apple-system, "Helvetica Neue", sans-serif; padding-top: 0; }
+        button.speak.stop { font-size: 11px; }
+        .copied {
+            position: absolute;
+            top: 30px;
+            right: 30px;
+            padding: 4px 8px;
+            border-radius: 10px;
+            background: #1c1c1e;
+            color: #ffffff;
+            font: 500 11px/1 -apple-system, "Helvetica Neue", sans-serif;
+            white-space: nowrap;
+            pointer-events: none;
+        }
     `;
 
     let host = null;
     let barShadow = null;
-    let button = null; // “ ” / ■
+    let button = null; // speaker / ■
     let speedButton = null;
     let askButton = null; // hidden while AI features are off (see Settings)
     let buttonIcon = "listen";
@@ -1474,8 +1509,8 @@
         askButton = document.createElement("button");
         askButton.type = "button";
         askButton.className = "ask";
-        askButton.textContent = "?";
-        askButton.title = "Ask about the highlighted text or image";
+        askButton.append(svgIcon("chat", 16));
+        askButton.title = "Ask or get help with the highlighted text or image";
         askButton.setAttribute("aria-label", askButton.title);
         askButton.hidden = !settings.aiFeatures;
         askButton.addEventListener("click", (event) => {
@@ -1492,7 +1527,7 @@
 
     function applyIcon() {
         const icon = ICONS[buttonIcon];
-        button.textContent = icon.text;
+        button.replaceChildren(icon.svg ? svgIcon(icon.svg, 16) : icon.text);
         button.title = icon.title;
         button.setAttribute("aria-label", icon.label);
         button.classList.toggle("stop", buttonIcon === "stop");
@@ -1591,7 +1626,7 @@
 
     // ---------- Settings (chosen in the toolbar popup, kept in browser.storage.local) ----------
     // voice: a voiceURI, or "" for the best available. showImageButtons / showLinkButtons: hover bars on
-    // images and charts / links. aiFeatures: off hides "?" and nothing is ever sent to Gemini.
+    // images and charts / links. aiFeatures: off hides the chat button and nothing is ever sent to Gemini.
 
     const settings = { voice: "", showImageButtons: false, showLinkButtons: false, aiFeatures: true };
 
@@ -1622,7 +1657,7 @@
         console.warn("[Listen] Settings storage unavailable:", e);
     }
 
-    // ---------- Ask panel ("?": questions about the highlighted text, answered by Gemini) ----------
+    // ---------- Ask panel (chat button: questions and requests about the highlighted text, answered by Gemini) ----------
     // The question is sent to background.js, which holds the API key and calls Gemini.
 
     const ASK_TIMEOUT_MS = 45000;
@@ -1643,12 +1678,37 @@
         ["readtext", "Read text in image", "Read out any text in the image"],
         ["explain", "Explain", "Explain the image simply"],
     ];
+    const EMAIL_CHIPS = [
+        ["reply", "Reply", "Draft a reply to this message"],
+        ["shorter", "Shorter", "Make the text shorter"],
+        ["polite", "More polite", "Make the text more polite"],
+        ["explain", "Explain", "Explain the message simply"],
+    ];
 
-    let askPanel = null; // { panel, input, send, chips, status, answerRow, answer, speak }
+    // ----- Emails and messages -----
+    // Text selected on a webmail site, or that reads like a message (a greeting, a sign-off, "From:" or
+    // "Subject:"), gets the email chips.
+
+    const MAIL_HOSTS = /^(mail\.google\.com|outlook\.live\.com|outlook\.office\.com|outlook\.office365\.com)$/;
+    const GREETING = /^\s*(hi|hello|hey|dear|good (morning|afternoon|evening))\b[^\n.?]{0,40}[,!]/i;
+    const SIGN_OFF =
+        /(^|\n|[.!?]\s+)(best( regards| wishes)?|kind regards|warm regards|regards|many thanks|thanks( again)?|thank you|cheers|sincerely|yours (truly|sincerely)|all the best|talk soon|take care)\s*(,|!|\n)[\p{L} .'’-]{0,40}$/iu;
+    const MAIL_HEADER = /(^|\n)\s*(from|subject):\s*\S/i;
+
+    function isMailSite() {
+        const host = location.hostname;
+        return MAIL_HOSTS.test(host) || (/(^|\.)icloud\.com$/.test(host) && /\/mail/.test(location.pathname));
+    }
+
+    function looksLikeMessage(text) {
+        return isMailSite() || GREETING.test(text) || SIGN_OFF.test(text.trim()) || MAIL_HEADER.test(text);
+    }
+
+    let askPanel = null; // { panel, input, send, chips, status, answerRow, answer, speak, copy, copied }
     let askContext = ""; // the highlighted text questions are about
     let askRange = null; // where that text is on the page, if known
     let askImage = null; // the image or chart questions are about, instead of text
-    let askKind = "text"; // "text", "code", "math", "image", "chart" or "link"
+    let askKind = "text"; // "text", "email", "code", "math", "image", "chart" or "link"
     let askCode = null; // the code block questions are about, when askKind is "code"
     let askRequest = 0; // id of the latest question; older answers are ignored
 
@@ -1746,8 +1806,7 @@
         row.className = "ask-row";
         const input = document.createElement("input");
         input.type = "text";
-        input.placeholder = "Ask about the highlighted text…";
-        input.setAttribute("aria-label", "Question about the highlighted text");
+        input.setAttribute("aria-label", "Question or request about the highlighted text");
         const send = document.createElement("button");
         send.type = "button";
         send.className = "send";
@@ -1765,14 +1824,25 @@
         answerRow.hidden = true;
         const answer = document.createElement("div");
         answer.className = "answer";
+        const tools = document.createElement("div");
+        tools.className = "answer-tools";
         const speak = document.createElement("button");
         speak.type = "button";
         speak.className = "speak";
-        answerRow.append(answer, speak);
+        const copy = document.createElement("button");
+        copy.type = "button";
+        copy.className = "copy";
+        const copied = document.createElement("div");
+        copied.className = "copied";
+        copied.setAttribute("role", "status");
+        copied.hidden = true;
+        tools.append(speak, copy, copied);
+        answerRow.append(answer, tools);
 
         panel.append(chips, row, status, answerRow);
-        askPanel = { panel, input, send, chipRow: chips, chips: [], status, answerRow, answer, speak };
+        askPanel = { panel, input, send, chipRow: chips, chips: [], status, answerRow, answer, speak, copy, copied };
         setAnswerSpeakIcon(false);
+        showCopied(null);
 
         // Keep typing out of the page (site shortcuts) and out of our own page-level key handlers.
         for (const type of ["keydown", "keyup", "keypress"]) {
@@ -1792,6 +1862,7 @@
             if (readingAnswer) speech.stop();
             else readAnswer();
         });
+        copy.addEventListener("click", () => copyAnswer());
         answer.addEventListener("scroll", () => highlighter.relayout(), { passive: true });
         return panel;
     }
@@ -1819,18 +1890,24 @@
         askImage = imageTarget;
         askCode = !askImage && selectedText ? selectedCodeBlock : null;
         const askMath = !askImage && !askCode && selectedText && rangeHasMath(selectedRange, selectedText);
-        askKind = askImage ? imageKind : askCode ? "code" : askMath ? "math" : "text";
+        askKind = askImage ? imageKind : askCode ? "code" : askMath ? "math" : looksLikeMessage(context) ? "email" : "text";
         askContext = askImage ? "" : context;
         askRange = askImage ? null : selectedText ? selectedRange : lastReadRange;
         markAsked(askRange);
         if (!askPanel) barShadow.append(createAskPanel());
         if (note) note.hidden = true;
-        const chips = { text: CHIPS, code: CODE_CHIPS, math: MATH_CHIPS, image: IMAGE_CHIPS, chart: CHART_CHIPS, link: LINK_CHIPS };
+        const chips = {
+            text: CHIPS, email: EMAIL_CHIPS, code: CODE_CHIPS, math: MATH_CHIPS, image: IMAGE_CHIPS, chart: CHART_CHIPS,
+            link: LINK_CHIPS,
+        };
+        // Text can be asked about or worked on ("write a reply", "make this shorter").
         const placeholders = {
-            text: "highlighted text", code: "code", math: "maths", image: "image", chart: "chart", link: "linked page",
+            text: "Ask anything, or say what you need…", email: "Ask, or say what to write…",
+            code: "Ask about the code…", math: "Ask about the maths…", image: "Ask about the image…",
+            chart: "Ask about the chart…", link: "Ask about the linked page…",
         };
         renderChips(chips[askKind]);
-        askPanel.input.placeholder = `Ask about the ${placeholders[askKind]}…`;
+        askPanel.input.placeholder = placeholders[askKind];
         askRequest++;
         askPanel.input.value = "";
         askPanel.status.hidden = true;
@@ -1879,6 +1956,7 @@
         if (lang) answer.lang = lang;
         else answer.removeAttribute("lang");
         answer.scrollTop = 0;
+        showCopied(null);
         language.prepare(text);
         answerRow.hidden = false;
         placeAskPanel();
@@ -1962,7 +2040,7 @@
 
     function setAnswerSpeakIcon(playing) {
         const { speak } = askPanel;
-        speak.textContent = playing ? "■" : "“”";
+        speak.replaceChildren(playing ? "■" : svgIcon("speaker", 13));
         speak.classList.toggle("stop", playing);
         speak.title = playing ? "Stop" : "Read answer aloud";
         speak.setAttribute("aria-label", speak.title);
@@ -1976,9 +2054,56 @@
         read(range, textNode.data, true);
     }
 
+    // ----- Copy -----
+
+    const COPIED_MS = 1500;
+    let copiedTimer = null;
+
+    // `ok`: true shows "Copied", false "Couldn't copy", null resets the button.
+    function showCopied(ok) {
+        const { copy, copied } = askPanel;
+        clearTimeout(copiedTimer);
+        copy.replaceChildren(svgIcon(ok ? "check" : "copy", 13));
+        copy.title = "Copy answer";
+        copy.setAttribute("aria-label", copy.title);
+        copied.hidden = ok === null;
+        copied.textContent = ok ? "Copied" : "Couldn't copy";
+        if (ok !== null) copiedTimer = setTimeout(() => showCopied(null), COPIED_MS);
+    }
+
+    // The older copy command is the fallback where the clipboard API isn't allowed.
+    function copyWithCommand(text) {
+        const field = document.createElement("textarea");
+        field.value = text;
+        field.style.cssText = "position: fixed; opacity: 0;";
+        barShadow.append(field);
+        field.select();
+        let ok = false;
+        try {
+            ok = document.execCommand("copy");
+        } catch (e) {
+            // not copied
+        }
+        field.remove();
+        return ok;
+    }
+
+    async function copyAnswer() {
+        const text = askPanel.answer.textContent;
+        if (!text) return;
+        let ok;
+        try {
+            await navigator.clipboard.writeText(text);
+            ok = true;
+        } catch (e) {
+            ok = copyWithCommand(text);
+        }
+        showCopied(ok);
+    }
+
     // ---------- Images ----------
-    // Hovering a content image shows the bar in its top-right corner. “ ” reads its alt text, or asks
-    // Gemini (through background.js) to describe it; "?" asks about it.
+    // Hovering a content image shows the bar in its top-right corner. The speaker reads its alt text, or asks
+    // Gemini (through background.js) to describe it; the chat button asks about it.
 
     const IMAGE_MIN_SIZE = 80;
     const IMAGE_HOVER_DELAY_MS = 400;
@@ -2157,7 +2282,7 @@
 
     // ---------- Charts ----------
     // Charts and graphs get the same hover bar as images: chart-like images, and large <canvas> or <svg>
-    // elements. “ ” asks Gemini to describe what the chart shows; "?" offers Describe / Key numbers /
+    // elements. The speaker asks Gemini to describe what the chart shows; the chat button offers Describe / Key numbers /
     // Explain. Canvas and svg charts exist only on the page, so they're captured here as a PNG (svg also
     // sends its text labels); background.js sends everything to Gemini.
 
@@ -2328,8 +2453,8 @@
     }
 
     // ---------- Code ----------
-    // A selection inside a code block isn't read symbol by symbol: “ ” asks Gemini (through background.js)
-    // for a short plain-English explanation and reads that, outlining the block; "?" offers Explain /
+    // A selection inside a code block isn't read symbol by symbol: the speaker asks Gemini (through background.js)
+    // for a short plain-English explanation and reads that, outlining the block; the chat button offers Explain /
     // Line by line / Find bugs. A single word or name in code is just read normally.
 
     // Elements that hold code (GitHub, Pygments, highlight.js, CodeMirror, plain <pre>/<code>) ...
@@ -2405,7 +2530,7 @@
     }
 
     // ---------- Links ----------
-    // Resting on a link shows the bar near it. “ ” reads a short summary of the linked page; "?" asks
+    // Resting on a link shows the bar near it. The speaker reads a short summary of the linked page; chat asks
     // about it. background.js fetches the page (no cookies, public addresses only) and asks Gemini.
 
     const LINK_HOVER_DELAY_MS = 600;
@@ -2417,7 +2542,7 @@
         ["keypoints", "Key points", "The linked page's key points"],
         ["worth", "Is it worth reading?", "Whether the linked page seems worth reading"],
     ];
-    const linkSummaries = new Map(); // address → summary, so a second “ ” is instant
+    const linkSummaries = new Map(); // address → summary, so a second listen is instant
 
     function linkUrl(a) {
         try {
@@ -2523,7 +2648,7 @@
             return;
         }
 
-        // A new selection gets a fresh “ ” button; clicking it replaces any current reading.
+        // A new selection gets a fresh speaker button; clicking it replaces any current reading.
         if (result.text !== selectedText) setButtonIcon("listen");
         selectedText = result.text;
         selectedRange = result.range;

@@ -143,7 +143,8 @@ async function chartImagePart(chart) {
 }
 
 
-// About text: action "ask" (with question), "summarize", "explain" or "translate" (with target language).
+// About text: action "ask" (with a question or request, e.g. "write a reply"), "summarize", "explain",
+// "translate" (with target language), or for emails and messages "reply", "shorter" or "polite".
 // About an image (image.src): "ask", "describe", "readtext" or "explain".
 // About a chart (chart: { src } or { data, mime_type }, plus labels and caption): "ask", "describe",
 // "keynumbers" or "explain".
@@ -152,7 +153,7 @@ async function chartImagePart(chart) {
 // About a linked page (link: { url }): "ask", "summarize", "keypoints" or "worth".
 async function ask({ action, question, text, target, image, chart, code, math, link }) {
     const kind = link ? "link" : math ? "math" : code ? "code" : chart ? "chart" : image ? "image" : "text";
-    if (action === "ask" && !question) throw new AskError("Type a question first.");
+    if (action === "ask" && !question) throw new AskError("Type a question or request first.");
     let input;
     if (link) {
         const page = await loadPage(link.url);
@@ -183,7 +184,7 @@ async function ask({ action, question, text, target, image, chart, code, math, l
     } else {
         const passage = text.length > MAX_CONTEXT_CHARS ? text.slice(0, MAX_CONTEXT_CHARS) : text;
         const quoted = `Highlighted text:\n"""\n${passage}\n"""`;
-        input = action === "ask" ? `${quoted}\n\nQuestion: ${question}` : quoted;
+        input = action === "ask" ? `${quoted}\n\nThe user's question or request: ${question}` : quoted;
     }
     const id = await installId();
     const controller = new AbortController();
