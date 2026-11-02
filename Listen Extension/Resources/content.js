@@ -1323,7 +1323,7 @@
         .panel.above { top: auto; bottom: ${BUTTON_SIZE + 8}px; }
         .panel[hidden], .panel [hidden] { display: none; }
         .ask-row { display: flex; gap: 6px; align-items: center; }
-        .chips { display: flex; gap: 6px; margin-bottom: 8px; }
+        .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
         button.chip {
             width: auto;
             min-width: 76px;
@@ -1602,7 +1602,7 @@
     let askContext = ""; // the highlighted text questions are about
     let askRange = null; // where that text is on the page, if known
     let askImage = null; // the image or chart questions are about, instead of text
-    let askKind = "text"; // "text", "code", "math", "image" or "chart"
+    let askKind = "text"; // "text", "code", "math", "image", "chart" or "link"
     let askCode = null; // the code block questions are about, when askKind is "code"
     let askRequest = 0; // id of the latest question; older answers are ignored
 
@@ -1779,8 +1779,10 @@
         markAsked(askRange);
         if (!askPanel) barShadow.append(createAskPanel());
         if (note) note.hidden = true;
-        const chips = { text: CHIPS, code: CODE_CHIPS, math: MATH_CHIPS, image: IMAGE_CHIPS, chart: CHART_CHIPS };
-        const placeholders = { text: "highlighted text", code: "code", math: "maths", image: "image", chart: "chart" };
+        const chips = { text: CHIPS, code: CODE_CHIPS, math: MATH_CHIPS, image: IMAGE_CHIPS, chart: CHART_CHIPS, link: LINK_CHIPS };
+        const placeholders = {
+            text: "highlighted text", code: "code", math: "maths", image: "image", chart: "chart", link: "linked page",
+        };
         renderChips(chips[askKind]);
         askPanel.input.placeholder = `Ask about the ${placeholders[askKind]}…`;
         askRequest++;
@@ -1887,7 +1889,8 @@
         showAskStatus("loading", "Thinking…");
         let about;
         try {
-            if (askKind === "code") about = { code: { text: askContext, language: codeLanguage(askCode) } };
+            if (askKind === "link") about = { link: { url: linkUrl(askImage).href } };
+            else if (askKind === "code") about = { code: { text: askContext, language: codeLanguage(askCode) } };
             else if (askKind === "math") {
                 const text = askImage ? texOf(askImage) || mathSpeech(askImage) : askRange ? mathContext(askRange) : askContext;
                 about = { math: { text } };
@@ -1933,7 +1936,7 @@
     const NOTE_MS = 6000;
 
     let imageTarget = null; // the image or chart the bar is for, or null when it's for selected text
-    let imageKind = "image"; // "image" or "chart"
+    let imageKind = "image"; // "image", "chart", "math" or "link"
     let imageBusy = false; // waiting for a description
     let imageRequest = 0; // id of the latest description request
     let hoverTimer = null;
@@ -1996,7 +1999,10 @@
         imageKind = kind;
         setButtonIcon("listen");
         if (kind === "math") showBar(mathOutlineTarget(img).getBoundingClientRect(), false);
-        else showBar(img.getBoundingClientRect(), true);
+        else if (kind === "link") {
+            const rects = img.getClientRects(); // a link can wrap over several lines; use its last one
+            showBar(rects[rects.length - 1] || img.getBoundingClientRect(), false);
+        } else showBar(img.getBoundingClientRect(), true);
     }
 
     function hideImageBar() {
@@ -2011,6 +2017,10 @@
         }
         if (imageKind === "math") {
             onListenMath(imageTarget);
+            return;
+        }
+        if (imageKind === "link") {
+            onListenLink(imageTarget);
             return;
         }
         const img = imageTarget;
@@ -2052,7 +2062,7 @@
                 clearTimeout(leaveTimer);
                 return;
             }
-            const found = visualTargetFor(event.target);
+            const found = visualTargetFor(event.target) || linkTargetFor(event.target);
             if (found && found.el === imageTarget) {
                 clearTimeout(leaveTimer);
                 return;
@@ -2064,7 +2074,7 @@
                 if (found.el.matches(":hover") && !selectedText && !speech.isSpeaking() && !isAskOpen()) {
                     showImageBar(found.el, found.kind);
                 }
-            }, IMAGE_HOVER_DELAY_MS);
+            }, found.kind === "link" ? LINK_HOVER_DELAY_MS : IMAGE_HOVER_DELAY_MS);
         },
         true
     );
@@ -2325,6 +2335,79 @@
         if (note) note.hidden = true;
         if (response.ok) {
             readAbout(block, response.answer);
+            return;
+        }
+        setButtonIcon("listen");
+        showNote(response.error);
+    }
+
+    // ---------- Links ----------
+    // Resting on a link shows the bar near it. “ ” reads a short summary of the linked page; "?" asks
+    // about it. background.js fetches the page (no cookies, public addresses only) and asks Gemini.
+
+    const LINK_HOVER_DELAY_MS = 600;
+    // Links to files rather than pages.
+    const DOWNLOAD_EXTENSIONS =
+        /\.(pdf|zip|rar|7z|gz|tgz|tar|dmg|pkg|exe|msi|apk|iso|img|bin|docx?|xlsx?|pptx?|csv|odt|ods|epub|mobi|mp3|wav|flac|m4a|mp4|mov|avi|mkv|webm|jpe?g|png|gif|webp|svg|heic|ics|vcf|json|xml|txt|torrent)$/i;
+    const LINK_CHIPS = [
+        ["summarize", "Summarize", "Summarize the linked page"],
+        ["keypoints", "Key points", "The linked page's key points"],
+        ["worth", "Is it worth reading?", "Whether the linked page seems worth reading"],
+    ];
+    const linkSummaries = new Map(); // address → summary, so a second “ ” is instant
+
+    function linkUrl(a) {
+        try {
+            const url = new URL(a.href, location.href);
+            url.hash = "";
+            return url;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    // IP addresses, localhost and local network names.
+    function isPrivateHost(host) {
+        const name = host.toLowerCase();
+        return !name.includes(".") || /^\[|:/.test(name) || /^\d{1,3}(\.\d{1,3}){3}$/.test(name) ||
+            /(^|\.)(localhost|local|internal|lan|home|intranet|corp)$/.test(name);
+    }
+
+    // The link under the pointer, as { el, kind: "link" }, if it leads to another web page.
+    function linkTargetFor(node) {
+        const a = node && node.closest && node.closest("a[href]");
+        if (!a || a.hasAttribute("download") || isEditable(a)) return null;
+        const raw = a.getAttribute("href").trim();
+        if (!raw || raw.startsWith("#") || /^(mailto|javascript|tel|sms|data|blob|file):/i.test(raw)) return null;
+        const url = linkUrl(a);
+        if (!url || !/^https?:$/.test(url.protocol) || isPrivateHost(url.hostname)) return null;
+        const here = new URL(location.href);
+        here.hash = "";
+        if (url.href === here.href) return null; // a section of this same page
+        if (DOWNLOAD_EXTENSIONS.test(url.pathname)) return null;
+        const rect = a.getBoundingClientRect();
+        const tinyIcon = !a.textContent.trim() && rect.width * rect.height < 1600;
+        if (rect.width < 16 || rect.height < 10 || tinyIcon) return null;
+        return { el: a, kind: "link" };
+    }
+
+    async function onListenLink(a) {
+        const url = linkUrl(a).href;
+        if (linkSummaries.has(url)) {
+            readAbout(a, linkSummaries.get(url));
+            return;
+        }
+        const id = ++imageRequest;
+        imageBusy = true;
+        setButtonIcon("loading");
+        showNote("Reading the linked page…", "info");
+        const response = await askBackground({ action: "summarize", link: { url } });
+        if (id !== imageRequest) return; // cancelled
+        imageBusy = false;
+        if (note) note.hidden = true;
+        if (response.ok) {
+            linkSummaries.set(url, response.answer);
+            readAbout(a, response.answer);
             return;
         }
         setButtonIcon("listen");
