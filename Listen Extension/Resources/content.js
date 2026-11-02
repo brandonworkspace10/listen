@@ -7,8 +7,9 @@
 
     // ---------- Speech (swap this section out for a better voice later) ----------
     // Interface: speech.speak(text, { onWord, onWordTimingUnavailable, onEnd }, lang), speech.stop(),
-    // speech.isSpeaking(), speech.setRate(rate). `lang` is a BCP 47 tag ("es", "pt-BR"); the best
-    // installed voice for it is used, or English if there is none. onWord(charIndex, charLength)
+    // speech.isSpeaking(), speech.setRate(rate), speech.setVoice(voiceURI). `lang` is a BCP 47 tag ("es",
+    // "pt-BR"); the voice chosen with setVoice() is used if it speaks that language, otherwise the best
+    // installed voice for it, or English if there is none. onWord(charIndex, charLength)
     // gives the position in `text` of the word being spoken (charLength may be 0); onEnd fires once
     // when reading finishes or is stopped.
 
@@ -26,6 +27,7 @@
         ]);
 
         let current = null; // the reading in progress; see speak()
+        let preferredVoice = ""; // voiceURI chosen in the popup; "" = best available
 
         // "Eddy (English (US))" → "Eddy"
         function baseName(voice) {
@@ -54,7 +56,8 @@
             return score;
         }
 
-        // Best installed voice for `lang` ("es", "es-MX"), or null if no voice speaks that language.
+        // The chosen voice if it speaks `lang`, else the best installed voice for `lang` ("es", "es-MX"),
+        // or null if no voice speaks that language.
         function pickVoice(lang) {
             const primary = normalizeLang(lang).split("-")[0];
             const voices = window.speechSynthesis
@@ -62,6 +65,8 @@
                 .filter((v) => v.lang && normalizeLang(v.lang).split("-")[0] === primary)
                 .filter((v) => !NOVELTY_VOICES.has(baseName(v)));
             if (voices.length === 0) return null;
+            const chosen = preferredVoice && voices.find((v) => v.voiceURI === preferredVoice);
+            if (chosen) return chosen;
             return voices.reduce((a, b) => (rank(b, lang) > rank(a, lang) ? b : a));
         }
 
@@ -153,7 +158,12 @@
             return current !== null;
         }
 
-        return { speak, stop, isSpeaking, setRate };
+        // Used from the next reading on.
+        function setVoice(voiceURI) {
+            preferredVoice = voiceURI || "";
+        }
+
+        return { speak, stop, isSpeaking, setRate, setVoice };
     })();
 
     // ---------- Language ----------
@@ -1218,7 +1228,7 @@
     function onListen() {
         const range = selectedRange;
         const codeBlock = selectedCodeBlock;
-        if (codeBlock) {
+        if (codeBlock && settings.aiFeatures) {
             onListenCode(selectedText, codeBlock); // see Code
             return;
         }
@@ -1305,6 +1315,7 @@
         button:active { transform: scale(0.95); }
         button:focus-visible { outline: 2px solid #0a84ff; outline-offset: 2px; }
         button:disabled { opacity: 0.4; cursor: default; transform: none; }
+        button[hidden] { display: none; }
 
         .panel {
             position: absolute;
@@ -1417,6 +1428,7 @@
     let barShadow = null;
     let button = null; // “ ” / ■
     let speedButton = null;
+    let askButton = null; // hidden while AI features are off (see Settings)
     let buttonIcon = "listen";
     let selectedText = "";
     let selectedRange = null;
@@ -1459,12 +1471,13 @@
             setSpeed(nextSpeed(), true);
         });
 
-        const askButton = document.createElement("button");
+        askButton = document.createElement("button");
         askButton.type = "button";
         askButton.className = "ask";
         askButton.textContent = "?";
         askButton.title = "Ask about the highlighted text or image";
         askButton.setAttribute("aria-label", askButton.title);
+        askButton.hidden = !settings.aiFeatures;
         askButton.addEventListener("click", (event) => {
             event.preventDefault();
             event.stopPropagation();
@@ -1574,6 +1587,39 @@
         });
     } catch (e) {
         console.warn("[Listen] Speed storage unavailable:", e);
+    }
+
+    // ---------- Settings (chosen in the toolbar popup, kept in browser.storage.local) ----------
+    // voice: a voiceURI, or "" for the best available. showImageButtons / showLinkButtons: hover bars on
+    // images and charts / links. aiFeatures: off hides "?" and nothing is ever sent to Gemini.
+
+    const settings = { voice: "", showImageButtons: false, showLinkButtons: false, aiFeatures: true };
+
+    function applySettings(values) {
+        if (typeof values.voice === "string") {
+            settings.voice = values.voice;
+            speech.setVoice(values.voice);
+        }
+        for (const key of ["showImageButtons", "showLinkButtons", "aiFeatures"]) {
+            if (typeof values[key] === "boolean") settings[key] = values[key];
+        }
+        if (askButton) askButton.hidden = !settings.aiFeatures;
+        if (!settings.aiFeatures && isAskOpen()) closeAsk();
+    }
+
+    try {
+        browser.storage.local.get(Object.keys(settings)).then(applySettings, (e) =>
+            console.warn("[Listen] Couldn't load settings:", e)
+        );
+        // Changes made in the popup apply straight away, in every open tab.
+        browser.storage.onChanged.addListener((changes, area) => {
+            if (area !== "local") return;
+            const values = {};
+            for (const key of Object.keys(settings)) if (changes[key]) values[key] = changes[key].newValue;
+            if (Object.keys(values).length) applySettings(values);
+        });
+    } catch (e) {
+        console.warn("[Listen] Settings storage unavailable:", e);
     }
 
     // ---------- Ask panel ("?": questions about the highlighted text, answered by Gemini) ----------
@@ -1868,6 +1914,10 @@
 
     // Sends a request to background.js; always resolves to { ok, answer } or { ok: false, error }.
     async function askBackground(request) {
+        if (!settings.aiFeatures) {
+            // imageUnavailable lets an image fall back to its alt text.
+            return { ok: false, error: "AI features are off. You can turn them on from Listen's toolbar button.", imageUnavailable: true };
+        }
         try {
             const timeout = new Promise((resolve) =>
                 setTimeout(() => resolve({ ok: false, error: "No answer came back in time. Try again." }), ASK_TIMEOUT_MS)
@@ -2053,6 +2103,19 @@
         setButtonIcon("listen");
     }
 
+    // What a hover bar can be shown for under the pointer, following the popup's settings. Equations
+    // always get one: they're read on the Mac, without AI.
+    function hoverTargetFor(node) {
+        const allowed = (found) => {
+            if (!found) return null;
+            if (found.kind === "math") return found;
+            if (found.kind === "link") return settings.showLinkButtons && settings.aiFeatures ? found : null;
+            if (found.kind === "chart") return settings.showImageButtons && settings.aiFeatures ? found : null;
+            return settings.showImageButtons ? found : null; // images with alt text are read without AI
+        };
+        return allowed(visualTargetFor(node)) || allowed(linkTargetFor(node));
+    }
+
     // Show the bar after the pointer rests on an image or chart (see Charts); hide it once the pointer
     // leaves both it and the bar.
     document.addEventListener(
@@ -2062,7 +2125,7 @@
                 clearTimeout(leaveTimer);
                 return;
             }
-            const found = visualTargetFor(event.target) || linkTargetFor(event.target);
+            const found = hoverTargetFor(event.target);
             if (found && found.el === imageTarget) {
                 clearTimeout(leaveTimer);
                 return;

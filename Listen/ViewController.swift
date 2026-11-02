@@ -23,12 +23,23 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
         self.webView.configuration.userContentController.add(self, name: "controller")
 
         self.webView.loadFileURL(Bundle.main.url(forResource: "Main", withExtension: "html")!, allowingReadAccessTo: Bundle.main.resourceURL!)
+
+        // Check again whenever the app comes back to the front, e.g. after turning Listen on in Safari.
+        NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.showExtensionState()
+        }
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        showExtensionState()
+    }
+
+    // Tells the page whether Listen is turned on in Safari.
+    func showExtensionState() {
+        guard let webView = self.webView, !webView.isLoading else { return }
         SFSafariExtensionManager.getStateOfSafariExtension(withIdentifier: extensionBundleIdentifier) { (state, error) in
             guard let state = state, error == nil else {
-                // Insert code to inform the user that something went wrong.
+                // The state couldn't be read; the page keeps showing "Checking…".
                 return
             }
 

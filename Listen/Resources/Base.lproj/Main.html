@@ -10,10 +10,33 @@
     <script src="../Script.js" defer></script>
 </head>
 <body>
-    <img src="../Icon.png" width="128" height="128" alt="Listen Icon">
-    <p class="state-unknown">You can turn on Listen’s extension in Safari Extensions preferences.</p>
-    <p class="state-on">Listen’s extension is currently on. You can turn it off in Safari Extensions preferences.</p>
-    <p class="state-off">Listen’s extension is currently off. You can turn it on in Safari Extensions preferences.</p>
-    <button class="open-preferences">Quit and Open Safari Extensions Preferences…</button>
+    <header>
+        <img src="../Icon.png" width="88" height="88" alt="">
+        <h1>Listen</h1>
+        <p class="pitch">Highlight anything on a web page to hear it read aloud, or ask about it.</p>
+        <p class="status" role="status">
+            <span class="dot"></span>
+            <span class="state-unknown">Checking whether Listen is on in Safari…</span>
+            <span class="state-on">Listen is on in Safari.</span>
+            <span class="state-off">Listen is off in Safari.</span>
+        </p>
+    </header>
+
+    <ol class="steps">
+        <li>
+            <strong>Open Safari Settings</strong>
+            <span>Use the button below. Listen closes while Safari opens.</span>
+        </li>
+        <li>
+            <strong>Turn on Listen</strong>
+            <span>In Extensions, tick the box next to Listen.</span>
+        </li>
+        <li>
+            <strong>Allow it on websites</strong>
+            <span>Highlight text on any page and click “ ”. If Safari asks, choose “Always Allow on Every Website”.</span>
+        </li>
+    </ol>
+
+    <button class="open-preferences" type="button">Open Safari Settings</button>
 </body>
 </html>

@@ -2,10 +2,53 @@
 <html>
 <head>
     <meta charset="UTF-8">
+    <title>Listen</title>
     <link rel="stylesheet" href="popup.css">
     <script type="module" src="popup.js"></script>
 </head>
 <body>
-    <strong>Hello World!</strong>
+    <header>
+        <img src="images/icon-96.png" width="36" height="36" alt="">
+        <div>
+            <h1>Listen</h1>
+            <p class="tagline">Highlight anything on a web page to hear it read aloud, or ask about it.</p>
+        </div>
+    </header>
+
+    <section>
+        <label class="heading" for="voice">Voice</label>
+        <div class="row">
+            <select id="voice">
+                <option value="">Automatic (best available)</option>
+            </select>
+            <button type="button" id="test" class="pill">Test</button>
+        </div>
+        <p class="hint" id="voice-hint">Used for text in your Mac’s language. Other languages pick their best voice.</p>
+    </section>
+
+    <section>
+        <span class="heading" id="speed-label">Default speed</span>
+        <div class="speeds" id="speeds" role="radiogroup" aria-labelledby="speed-label"></div>
+    </section>
+
+    <section class="toggles">
+        <label class="toggle">
+            <span>Show buttons on images and charts</span>
+            <input type="checkbox" id="showImageButtons" role="switch">
+        </label>
+        <label class="toggle">
+            <span>Show buttons on links</span>
+            <input type="checkbox" id="showLinkButtons" role="switch">
+        </label>
+        <label class="toggle">
+            <span>AI features (?)</span>
+            <input type="checkbox" id="aiFeatures" role="switch">
+        </label>
+    </section>
+
+    <footer>
+        <p class="usage" id="usage"></p>
+        <p class="privacy">Questions are sent to Google Gemini to answer. Reading stays on your Mac.</p>
+    </footer>
 </body>
 </html>

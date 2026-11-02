@@ -311,5 +311,5 @@ export async function POST(request) {
         .join("")
         .trim();
     if (!answer) return done(502, { error: "no_answer" }, kind, action);
-    return done(200, { answer }, kind, action);
+    return done(200, { answer, remaining: Math.max(0, DAILY_LIMIT - counts.count), limit: DAILY_LIMIT }, kind, action);
 }

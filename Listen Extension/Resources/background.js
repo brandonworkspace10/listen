@@ -93,10 +93,18 @@ function installId() {
     });
 }
 
+// Remembers how many questions are left today (UTC, like the proxy's count), for the toolbar popup.
+function saveUsage(remaining, limit) {
+    if (!Number.isInteger(remaining) || !Number.isInteger(limit)) return;
+    const day = new Date().toISOString().slice(0, 10);
+    browser.storage.local.set({ usage: { day, remaining, limit } }).catch(() => {});
+}
+
 // Turns an error from the proxy into a clear message.
 function errorFor(body) {
     switch (body?.error) {
         case "daily_limit": {
+            saveUsage(0, body.limit);
             const hours = body.resetHours > 1 ? `about ${body.resetHours} hours` : "about an hour";
             return new AskError(`You've used today's ${body.limit} questions. They reset in ${hours}.`);
         }
@@ -205,6 +213,7 @@ async function ask({ action, question, text, target, image, chart, code, math, l
     if (!response.ok) throw errorFor(body);
     const answer = typeof body?.answer === "string" ? body.answer.trim() : "";
     if (!answer) throw new AskError("Gemini didn't return an answer. Try rephrasing the question.");
+    saveUsage(body.remaining, body.limit);
     // Spoken answers drop markdown backticks; link answers never carry web addresses.
     if (link) return answer.replace(/(https?:\/\/|www\.)\S+/gi, "").replace(/\s{2,}/g, " ").trim();
     return code || math ? answer.replace(/`+/g, "") : answer;
