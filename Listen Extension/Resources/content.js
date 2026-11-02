@@ -260,6 +260,276 @@
         return { prepare, detect };
     })();
 
+    // ---------- Maths ----------
+    // Equations are read the way a person says them ("x squared plus 2 x equals 10"). The spoken form is
+    // made here from the equation's MathML (MathML, MathJax, KaTeX and Wikipedia all include it); only
+    // equations too complex for that (matrices, unknown markup) or with nothing but TeX are spoken by
+    // Gemini, through background.js. Maths symbols in ordinary text (², √, ≤ …) are said in words too.
+
+    // Outermost elements that hold one equation.
+    const MATH_SELECTOR = ".mwe-math-element, mjx-container, .MathJax, .MathJax_Display, .katex-display, .katex, math";
+    const MATH_HELP_TIMEOUT_MS = 30000;
+
+    const MATH_OPERATORS = {
+        "+": "plus", "-": "minus", "−": "minus", "=": "equals", "≠": "is not equal to",
+        "<": "is less than", ">": "is greater than", "≤": "is less than or equal to",
+        "≥": "is greater than or equal to", "≈": "is approximately equal to", "≡": "is equivalent to",
+        "×": "times", "⋅": "times", "·": "times", "∗": "times", "÷": "divided by", "/": "over",
+        "±": "plus or minus", "∓": "minus or plus", "→": "tends to", "⇒": "implies",
+        "⇔": "if and only if", "∈": "is in", "∉": "is not in", "⊂": "is a subset of",
+        "∪": "union", "∩": "intersection", "∞": "infinity", "!": "factorial", "′": "prime",
+        "″": "double prime", "∝": "is proportional to", "∠": "angle", "°": "degrees", "%": "percent",
+        "∑": "the sum of", "∏": "the product of", "∫": "the integral of", "∮": "the contour integral of",
+        "∂": "partial", "∇": "del", "|": "", "(": "", ")": "", "[": "", "]": "", "{": "", "}": "",
+        "⟨": "", "⟩": "", ",": ",", ";": ";", ":": "", ".": "",
+        "⁡": "of", "⁢": "", "⁣": ",", "⁤": "plus",
+    };
+    const MATH_LETTERS = {
+        "α": "alpha", "β": "beta", "γ": "gamma", "δ": "delta", "ε": "epsilon", "ϵ": "epsilon",
+        "ζ": "zeta", "η": "eta", "θ": "theta", "ι": "iota", "κ": "kappa", "λ": "lambda",
+        "μ": "mu", "ν": "nu", "ξ": "xi", "π": "pi", "ρ": "rho", "σ": "sigma", "τ": "tau",
+        "υ": "upsilon", "φ": "phi", "ϕ": "phi", "χ": "chi", "ψ": "psi", "ω": "omega",
+        "Γ": "capital gamma", "Δ": "capital delta", "Θ": "capital theta", "Λ": "capital lambda",
+        "Π": "capital pi", "Σ": "capital sigma", "Φ": "capital phi", "Ψ": "capital psi",
+        "Ω": "capital omega", "ℝ": "the real numbers", "ℕ": "the natural numbers",
+        "ℤ": "the integers", "ℚ": "the rational numbers", "ℂ": "the complex numbers",
+    };
+    const MATH_FUNCTIONS = {
+        sin: "sine", cos: "cosine", tan: "tangent", sec: "secant", csc: "cosecant", cot: "cotangent",
+        arcsin: "arc sine", arccos: "arc cosine", arctan: "arc tangent", sinh: "hyperbolic sine",
+        cosh: "hyperbolic cosine", tanh: "hyperbolic tangent", log: "log", ln: "natural log", lim: "the limit",
+        det: "determinant", exp: "exp", max: "max", min: "min", sup: "supremum", inf: "infimum",
+    };
+    const BIG_OPERATORS = { "∑": "the sum", "∏": "the product", "∫": "the integral", "∮": "the contour integral" };
+    const ACCENTS = {
+        "¯": "bar", "‾": "bar", "^": "hat", "ˆ": "hat", "~": "tilde", "˜": "tilde",
+        "˙": "dot", "¨": "double dot", "→": "vector", "⃗": "vector",
+    };
+    // Maths symbols in ordinary text, said in words.
+    const SPOKEN_SYMBOLS = {
+        "²": "squared", "³": "cubed", "√": "the square root of", "∑": "the sum of",
+        "∫": "the integral of", "π": "pi", "≤": "is less than or equal to",
+        "≥": "is greater than or equal to", "≠": "is not equal to", "≈": "is approximately equal to",
+        "±": "plus or minus", "×": "times", "÷": "divided by", "∞": "infinity", "−": "minus",
+        "½": "one half", "¼": "one quarter", "¾": "three quarters", "⅓": "one third",
+        "⅔": "two thirds", "∂": "partial", "→": "tends to", "∈": "is in",
+    };
+    const SUPERSCRIPT_DIGITS = { "⁰": "0", "¹": "1", "⁴": "4", "⁵": "5", "⁶": "6", "⁷": "7", "⁸": "8", "⁹": "9", "ⁿ": "n" };
+    const MATH_TEXT_HINT = /[²³√∑∫∏π≤≥≠≈±÷∞∂½¼¾⅓⅔]/;
+
+    const mathCache = new WeakMap(); // equation element → { local: { text, complete }, helped?: string }
+
+    function mathContainerOf(node) {
+        let el = node && (node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement);
+        let found = null;
+        while (el && (el = el.closest(MATH_SELECTOR))) {
+            found = el;
+            el = el.parentElement;
+        }
+        return found;
+    }
+
+    // The words for one text-ish MathML token.
+    function tokenWords(text, operator) {
+        const t = text.trim();
+        if (operator && t in MATH_OPERATORS) return MATH_OPERATORS[t];
+        if (t in MATH_LETTERS) return MATH_LETTERS[t];
+        if (t in MATH_FUNCTIONS) return MATH_FUNCTIONS[t];
+        return [...t].map((ch) => MATH_LETTERS[ch] || MATH_OPERATORS[ch] || ch).join(t.length > 1 && /\W/.test(t) ? " " : "");
+    }
+
+    // Converts presentation MathML to words. `complete` is false when it met markup it can't say well.
+    function mathmlToSpeech(math) {
+        let complete = true;
+        const isSimple = (words) => !/\s/.test(words.trim());
+        const bigOperator = (el) => {
+            const t = el && el.textContent.trim();
+            if (t in BIG_OPERATORS) return BIG_OPERATORS[t];
+            return t === "lim" ? "the limit" : null;
+        };
+        const OPENERS = { "(": ")", "[": "]", "{": "}" };
+        const isOperand = (el) => el && el.localName !== "mo";
+        // Says a row of siblings. A bracketed group with an operator inside is read as "the quantity …,"
+        // (with "times" when it follows a term), like "n times the quantity n plus 1"; simple ones are silent.
+        const sayRow = (kids) => {
+            const parts = [];
+            for (let i = 0; i < kids.length; i++) {
+                const kid = kids[i];
+                const close = kid.localName === "mo" && OPENERS[kid.textContent.trim()];
+                if (close) {
+                    let depth = 0;
+                    let j = i;
+                    for (; j < kids.length; j++) {
+                        const t = kids[j].localName === "mo" ? kids[j].textContent.trim() : "";
+                        if (t === kid.textContent.trim()) depth++;
+                        else if (t === close && --depth === 0) break;
+                    }
+                    if (j < kids.length) {
+                        const inner = sayRow(kids.slice(i + 1, j));
+                        if (/\s/.test(inner)) {
+                            parts.push(`${isOperand(kids[i - 1]) || (kids[i - 1] && kids[i - 1].textContent.trim() === ")") ? "times " : ""}the quantity ${inner},`);
+                        } else {
+                            parts.push(inner);
+                        }
+                        i = j;
+                        continue;
+                    }
+                }
+                parts.push(say(kid));
+            }
+            return parts.filter(Boolean).join(" ");
+        };
+        const say = (node) => {
+            if (node.nodeType === Node.TEXT_NODE) return node.data.trim();
+            if (node.nodeType !== Node.ELEMENT_NODE) return "";
+            const kids = [...node.children];
+            const all = () => sayRow(kids);
+            switch (node.localName) {
+                case "math": case "mrow": case "mstyle": case "mpadded": case "merror": case "mfenced":
+                case "menclose": case "mtd": case "mlabeledtr":
+                    return all();
+                case "semantics":
+                    return kids.length ? say(kids[0]) : "";
+                case "annotation": case "annotation-xml": case "mspace": case "mphantom": case "none": case "mprescripts":
+                    return "";
+                case "mi": case "mtext": case "ms":
+                    return tokenWords(node.textContent, false);
+                case "mn":
+                    return node.textContent.trim();
+                case "mo":
+                    return tokenWords(node.textContent, true);
+                case "msup": {
+                    const [base, exp] = kids.map(say);
+                    const e = (exp || "").trim();
+                    if (e === "2") return `${base} squared`;
+                    if (e === "3") return `${base} cubed`;
+                    if (e === "prime" || e === "double prime") return `${base} ${e}`;
+                    return `${base} to the power of ${e}${isSimple(e) ? "" : ","}`;
+                }
+                case "msub":
+                    return `${say(kids[0])} sub ${say(kids[1])}`;
+                case "msubsup": case "munderover": {
+                    const op = bigOperator(kids[0]);
+                    if (op) return `${op} from ${say(kids[1])} to ${say(kids[2])} of`;
+                    return `${say(kids[0])} sub ${say(kids[1])} to the power of ${say(kids[2])}`;
+                }
+                case "munder": {
+                    const op = bigOperator(kids[0]);
+                    if (op === "the limit") return `the limit as ${say(kids[1])} of`;
+                    if (op) return `${op} over ${say(kids[1])} of`;
+                    return `${say(kids[0])} under ${say(kids[1])}`;
+                }
+                case "mover": {
+                    const accent = kids[1] && ACCENTS[kids[1].textContent.trim()];
+                    if (accent === "vector") return `vector ${say(kids[0])}`;
+                    if (accent) return `${say(kids[0])} ${accent}`;
+                    return `${say(kids[0])} with ${say(kids[1])} above`;
+                }
+                case "mfrac": {
+                    const [n, d] = kids.map(say);
+                    return isSimple(n) && isSimple(d) ? `${n} over ${d}` : `the fraction ${n}, over ${d}, end fraction`;
+                }
+                case "msqrt":
+                    return `the square root of ${all()}${kids.length > 1 ? ", end root" : ""}`;
+                case "mroot": {
+                    const index = say(kids[1]).trim();
+                    const name = index === "3" ? "cube" : index === "2" ? "square" : `${index}th`;
+                    return `the ${name} root of ${say(kids[0])}`;
+                }
+                default: // tables (matrices), multiscripts and anything unknown
+                    complete = false;
+                    return all();
+            }
+        };
+        const text = say(math).replace(/\s+/g, " ").replace(/\s+([,;])/g, "$1").replace(/,+/g, ",").trim();
+        return { text, complete: complete && Boolean(text) };
+    }
+
+    // The part of an equation that's actually drawn (rendered MathML, fallback image, KaTeX or MathJax
+    // output), for outlining it. Wrappers can be taller than the equation, e.g. an inline span around a
+    // displayed equation.
+    function mathOutlineTarget(container) {
+        let best = null;
+        let bestArea = 0;
+        for (const el of container.querySelectorAll("math, img, svg, mjx-math, .katex-html")) {
+            const rect = el.getBoundingClientRect();
+            if (rect.width * rect.height > bestArea) {
+                best = el;
+                bestArea = rect.width * rect.height;
+            }
+        }
+        return best || container;
+    }
+
+    // The equation's TeX source, if the page includes it.
+    function texOf(container) {
+        const annotation = container.querySelector("annotation[encoding='application/x-tex']");
+        const math = container.localName === "math" ? container : container.querySelector("math");
+        const img = container.querySelector("img[alt]");
+        const script = container.parentElement && container.parentElement.querySelector("script[type^='math/tex']");
+        const tex = (annotation && annotation.textContent) || (math && math.getAttribute("alttext")) ||
+            (img && img.getAttribute("alt")) || container.getAttribute("aria-label") || (script && script.textContent) || "";
+        return tex.trim().replace(/^\{\\displaystyle\s*([\s\S]*)\}$/, "$1").trim();
+    }
+
+    function localMath(container) {
+        let entry = mathCache.get(container);
+        if (!entry) {
+            const math = container.localName === "math" ? container : container.querySelector("math");
+            entry = { local: math ? mathmlToSpeech(math) : { text: "", complete: false } };
+            mathCache.set(container, entry);
+        }
+        return entry;
+    }
+
+    // Words for an equation: from its MathML, or from Gemini when prepareMath() asked for help.
+    function mathSpeech(container) {
+        const entry = localMath(container);
+        return entry.helped || entry.local.text || texOf(container) || "an equation";
+    }
+
+    function mathContainersIn(range) {
+        const root = range.commonAncestorContainer;
+        const rootEl = root.nodeType === Node.ELEMENT_NODE ? root : root.parentElement;
+        const outer = mathContainerOf(rootEl);
+        if (outer) return [outer];
+        return [...rootEl.querySelectorAll(MATH_SELECTOR)].filter((el) => !mathContainerOf(el.parentElement) && range.intersectsNode(el));
+    }
+
+    // Equations in `range` that can't be said from their MathML and haven't been sent to Gemini yet.
+    function mathNeedingHelp(range) {
+        return mathContainersIn(range).filter((el) => {
+            const entry = localMath(el);
+            return !entry.local.complete && entry.helped === undefined;
+        });
+    }
+
+    // Asks Gemini how to say the equations that mathNeedingHelp() found.
+    async function prepareMath(containers) {
+        await Promise.all(containers.slice(0, 8).map(async (el) => {
+            const entry = localMath(el);
+            const source = texOf(el) || (el.querySelector("math") || el).outerHTML.slice(0, 4000);
+            const timeout = new Promise((resolve) => setTimeout(() => resolve({ ok: false }), MATH_HELP_TIMEOUT_MS));
+            const response = await Promise.race([askBackground({ action: "speak", math: { text: source } }), timeout]);
+            entry.helped = response.ok ? response.answer : ""; // "" = asked, use the local words or TeX
+        }));
+    }
+
+    // The selection as text for Gemini, with each equation replaced by its TeX (or spoken form).
+    function mathContext(range) {
+        const fragment = range.cloneContents();
+        const originals = mathContainersIn(range);
+        [...fragment.querySelectorAll(MATH_SELECTOR)].filter((el) => !mathContainerOf(el.parentElement)).forEach((el, i) => {
+            const source = texOf(el) || (originals[i] ? mathSpeech(originals[i]) : el.textContent);
+            el.replaceWith(document.createTextNode(` ${source} `));
+        });
+        return fragment.textContent.replace(/\s+/g, " ").trim();
+    }
+
+    function rangeHasMath(range, text) {
+        return Boolean(range && mathContainersIn(range).length) || MATH_TEXT_HINT.test(text);
+    }
+
     // ---------- Word highlighting ----------
     // Interface: highlighter.prepare(range) → text to speak; highlighter.showWord(charIndex, charLength);
     // highlighter.clear(); highlighter.relayout() after something scrolls; highlighter.outline(element)
@@ -343,9 +613,18 @@
         // ----- Writing the spoken text (each character remembers where it came from) -----
 
         // Adds characters [start, end) of a text node, collapsing whitespace the way the page shows it.
+        // Maths symbols are spoken as words ("x²" → "x squared"); the words still point at the symbol.
         function appendNodeText(node, start, end) {
             const data = node.data;
             for (let i = start; i < end; i++) {
+                const words = SPOKEN_SYMBOLS[data[i]] || (SUPERSCRIPT_DIGITS[data[i]] && `to the power of ${SUPERSCRIPT_DIGITS[data[i]]}`);
+                if (words) {
+                    for (const ch of `${text && !/\s$/.test(text) ? " " : ""}${words} `) {
+                        text += ch;
+                        map.push({ node, offset: i });
+                    }
+                    continue;
+                }
                 if (/\s/.test(data[i])) {
                     if (!text || /\s$/.test(text)) continue;
                     text += " ";
@@ -390,16 +669,37 @@
                 acceptNode(node) {
                     if (node.nodeType === Node.TEXT_NODE) return NodeFilter.FILTER_ACCEPT;
                     if (isHidden(node) || isFootnoteMarker(node)) return NodeFilter.FILTER_REJECT;
+                    if (node.matches(MATH_SELECTOR)) return NodeFilter.FILTER_ACCEPT;
                     return node.tagName === "BR" ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP;
                 },
             });
+            let doneMath = null;
             for (let node = walker.nextNode(); node; node = walker.nextNode()) {
-                if (node.nodeType === Node.ELEMENT_NODE) {
+                if (doneMath && doneMath.contains(node)) continue;
+                if (node.nodeType === Node.ELEMENT_NODE && node.matches(MATH_SELECTOR)) {
+                    appendMath(node);
+                    doneMath = node;
+                } else if (node.nodeType === Node.ELEMENT_NODE) {
                     if (text && !/\s$/.test(text)) appendSpoken(" "); // <br> inside a cell
                 } else {
                     appendNodeText(node, 0, node.data.length);
                 }
             }
+        }
+
+        // Adds an equation as its spoken words (see Maths). Each character points at the equation element,
+        // so while it's spoken the pill becomes an outline around it.
+        function appendMath(container) {
+            const block = isBlock(container);
+            if (block) lineBreak();
+            else if (text && !/\s$/.test(text)) appendSpoken(" ");
+            const box = mathOutlineTarget(container);
+            for (const ch of mathSpeech(container)) {
+                text += ch;
+                map.push({ math: box });
+            }
+            if (block) lineBreak();
+            else appendSpoken(" ");
         }
 
         // ----- Tables -----
@@ -556,6 +856,12 @@
             const root = range.commonAncestorContainer;
             const rootEl = root.nodeType === Node.ELEMENT_NODE ? root : root.parentElement;
             // A selection entirely inside one table never meets the <table> element while walking.
+            const enclosingMath = mathContainerOf(rootEl);
+            if (enclosingMath) {
+                appendMath(enclosingMath);
+                trimEnd();
+                return;
+            }
             const enclosingTable = rootEl && rootEl.closest("table");
             if (enclosingTable && readsAsTable(enclosingTable, range)) {
                 appendTable(enclosingTable, range);
@@ -572,19 +878,23 @@
                         if (node.nodeType === Node.TEXT_NODE) return NodeFilter.FILTER_ACCEPT;
                         if (isHidden(node)) return NodeFilter.FILTER_REJECT;
                         if (node.tagName === "TABLE" && readsAsTable(node, range)) return NodeFilter.FILTER_ACCEPT;
+                        if (node.matches(MATH_SELECTOR)) return NodeFilter.FILTER_ACCEPT;
                         return node.tagName === "BR" ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP;
                     },
                 }
             );
 
             let lastBlock = null;
-            let doneTable = null; // a table already read; its contents are skipped
+            let done = null; // a table or equation already read; its contents are skipped
             for (let node = walker.nextNode(); node; node = walker.nextNode()) {
-                if (doneTable && doneTable.contains(node)) continue;
+                if (done && done.contains(node)) continue;
                 if (node.nodeType === Node.ELEMENT_NODE) {
-                    if (node.tagName === "TABLE") {
+                    if (node.matches(MATH_SELECTOR)) {
+                        appendMath(node);
+                        done = node;
+                    } else if (node.tagName === "TABLE") {
                         appendTable(node, range);
-                        doneTable = node;
+                        done = node;
                         lastBlock = node;
                     } else {
                         lineBreak(); // <br>
@@ -707,10 +1017,15 @@
         // Positions the pill over `words`. instant: move without gliding (scroll, resize, line change).
         function layout(instant) {
             if (overlay && outlined) {
-                layoutOutline();
+                layoutOutline(outlined);
                 return;
             }
             if (!overlay || !words) return;
+            if (words.math) {
+                layoutOutline(words.math);
+                return;
+            }
+            overlay.pill.classList.remove("outline");
             const cur = lineBox(words.current);
             if (!cur) return;
             let next = words.next ? lineBox(words.next) : null;
@@ -752,9 +1067,11 @@
             lastTop = top;
         }
 
-        function layoutOutline() {
-            const rect = outlined.getBoundingClientRect();
+        // Frames `element` (an image, or an equation being spoken) with the outline style.
+        function layoutOutline(element) {
+            const rect = element.getBoundingClientRect();
             const { pill } = overlay;
+            pill.classList.add("outline");
             pill.style.transform =
                 `translate(${rect.left - OUTLINE_PAD + window.scrollX}px, ${rect.top - OUTLINE_PAD + window.scrollY}px)`;
             pill.style.width = `${rect.width + 2 * OUTLINE_PAD}px`;
@@ -790,6 +1107,17 @@
 
         function showWord(charIndex, charLength) {
             if (!text || charIndex >= text.length) return;
+            const spot = map[charIndex];
+            if (spot && spot.math) {
+                words = { math: spot.math };
+                if (!overlay) {
+                    overlay = createOverlay();
+                    watchViewport(true);
+                }
+                layout(false);
+                lastTop = null; // the next word starts fresh instead of gliding out of the outline
+                return;
+            }
             const end = wordEnd(charIndex, charLength);
             const current = rangeFor(charIndex, end);
             if (!current) return;
@@ -839,8 +1167,19 @@
     let readingAnswer = false; // whether the current reading is the answer in the ask panel
 
     // Reads `range` aloud with word highlighting; `text` is the fallback if it can't be mapped.
-    function read(range, text, isAnswer) {
+    async function read(range, text, isAnswer) {
         speech.stop(); // end any current reading (and its highlights) before preparing the new one
+        const hard = range ? mathNeedingHelp(range) : [];
+        if (hard.length) {
+            const id = ++imageRequest;
+            imageBusy = true;
+            setButtonIcon("loading");
+            if (barShadow) showNote("Working out how to say the maths…", "info");
+            await prepareMath(hard);
+            if (id !== imageRequest) return; // cancelled
+            imageBusy = false;
+            if (note) note.hidden = true;
+        }
         const lang = language.detect(range, text);
         const spoken = (range && highlighter.prepare(range)) || text;
         speech.speak(
@@ -1226,6 +1565,11 @@
         ["translate", "Translate", "Translate the highlighted text"],
         ["explain", "Explain", "Explain the highlighted text simply"],
     ];
+    const MATH_CHIPS = [
+        ["explain", "Explain", "Explain the maths simply"],
+        ["solve", "Solve step by step", "Work through it step by step"],
+        ["readit", "Read it", "Read the maths aloud"],
+    ];
     const IMAGE_CHIPS = [
         ["describe", "Describe", "Describe the image"],
         ["readtext", "Read text in image", "Read out any text in the image"],
@@ -1236,7 +1580,7 @@
     let askContext = ""; // the highlighted text questions are about
     let askRange = null; // where that text is on the page, if known
     let askImage = null; // the image or chart questions are about, instead of text
-    let askKind = "text"; // "text", "code", "image" or "chart"
+    let askKind = "text"; // "text", "code", "math", "image" or "chart"
     let askCode = null; // the code block questions are about, when askKind is "code"
     let askRequest = 0; // id of the latest question; older answers are ignored
 
@@ -1406,14 +1750,15 @@
         if ((!imageTarget && !context) || !host) return;
         askImage = imageTarget;
         askCode = !askImage && selectedText ? selectedCodeBlock : null;
-        askKind = askImage ? imageKind : askCode ? "code" : "text";
+        const askMath = !askImage && !askCode && selectedText && rangeHasMath(selectedRange, selectedText);
+        askKind = askImage ? imageKind : askCode ? "code" : askMath ? "math" : "text";
         askContext = askImage ? "" : context;
         askRange = askImage ? null : selectedText ? selectedRange : lastReadRange;
         markAsked(askRange);
         if (!askPanel) barShadow.append(createAskPanel());
         if (note) note.hidden = true;
-        const chips = { text: CHIPS, code: CODE_CHIPS, image: IMAGE_CHIPS, chart: CHART_CHIPS };
-        const placeholders = { text: "highlighted text", code: "code", image: "image", chart: "chart" };
+        const chips = { text: CHIPS, code: CODE_CHIPS, math: MATH_CHIPS, image: IMAGE_CHIPS, chart: CHART_CHIPS };
+        const placeholders = { text: "highlighted text", code: "code", math: "maths", image: "image", chart: "chart" };
         renderChips(chips[askKind]);
         askPanel.input.placeholder = `Ask about the ${placeholders[askKind]}…`;
         askRequest++;
@@ -1483,6 +1828,11 @@
     }
 
     function sendChip(action) {
+        if (action === "readit") {
+            // Read the selected maths aloud with Listen's own spoken form (no Gemini needed).
+            if (askRange) read(askRange, askContext, false);
+            return;
+        }
         if (action !== "translate" || askImage) {
             askGemini({ action }, "");
             return;
@@ -1515,6 +1865,7 @@
         let about;
         try {
             if (askKind === "code") about = { code: { text: askContext, language: codeLanguage(askCode) } };
+            else if (askKind === "math") about = { math: { text: askRange ? mathContext(askRange) : askContext } };
             else if (!askImage) about = { text: askContext };
             else if (askKind === "chart") about = { chart: await chartInfo(askImage) };
             else about = { image: imageInfo(askImage) };

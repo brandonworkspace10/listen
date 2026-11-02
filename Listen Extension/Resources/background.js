@@ -1,5 +1,5 @@
 // Listen — background page
-// Answers questions about highlighted text, code, images and charts with Gemini. The API key lives in secrets.js (git-ignored)
+// Answers questions about highlighted text, code, maths, images and charts with Gemini. The API key lives in secrets.js (git-ignored)
 // and is only ever used here, never sent to content scripts or logged.
 
 const GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/interactions";
@@ -83,6 +83,24 @@ const CODE_INSTRUCTIONS = {
         "markdown or code symbols. If the code doesn't show the answer, say so.",
 };
 const CODE_MAX_OUTPUT_TOKENS = { explain: 400, linebyline: 1500, bugs: 1000, ask: 500 };
+
+// The same, for maths. Answers are read aloud, so formulas are said in words, never symbols or LaTeX.
+const SAY_MATHS_IN_WORDS =
+    "Say every formula the way a person would read it aloud, in words (for example 'x squared plus 2 x " +
+    "equals 10'), never with symbols or LaTeX. No markdown.";
+const MATH_INSTRUCTIONS = {
+    explain: () =>
+        "Explain simply what this maths means and what it's used for, in two to four plain sentences suited to " +
+        `listening. Don't just read the formula out. ${SAY_MATHS_IN_WORDS}`,
+    solve: () =>
+        "Solve this step by step. Start each step with 'Step one', 'Step two' and so on, and keep each step short. " +
+        `If there is nothing to solve, explain what it means instead. ${SAY_MATHS_IN_WORDS}`,
+    speak: () =>
+        "Rewrite this mathematical expression the way a maths teacher would read it aloud, in plain English words " +
+        "only (for example 'the integral from 0 to 1 of x squared d x'). Reply with only those words.",
+    ask: () => `Answer the user's question about this maths briefly and clearly. ${SAY_MATHS_IN_WORDS}`,
+};
+const MATH_MAX_OUTPUT_TOKENS = { explain: 600, solve: 1500, speak: 300, ask: 500 };
 
 // Thrown for failures the user should see; `message` is shown as is. `imageUnavailable` marks an image
 // that couldn't be fetched or decoded, so the page can fall back to its alt text.
@@ -199,13 +217,19 @@ async function chartImagePart(chart) {
 // About a chart (chart: { src } or { data, mime_type }, plus labels and caption): "ask", "describe",
 // "keynumbers" or "explain".
 // About code (code: { text, language }): "ask", "explain", "linebyline" or "bugs".
-async function ask({ action, question, text, target, image, chart, code }) {
-    const instructions = code ? CODE_INSTRUCTIONS : chart ? CHART_INSTRUCTIONS : image ? IMAGE_INSTRUCTIONS : INSTRUCTIONS;
+// About maths (math: { text }, with TeX or MathML for each equation): "ask", "explain", "solve" or "speak".
+async function ask({ action, question, text, target, image, chart, code, math }) {
+    const instructions = math
+        ? MATH_INSTRUCTIONS
+        : code ? CODE_INSTRUCTIONS : chart ? CHART_INSTRUCTIONS : image ? IMAGE_INSTRUCTIONS : INSTRUCTIONS;
     if (!instructions[action]) throw new AskError("Unknown request.");
     if (action === "ask" && !question) throw new AskError("Type a question first.");
     const key = await loadApiKey();
     let input;
-    if (code) {
+    if (math) {
+        const quoted = `Maths:\n"""\n${String(math.text || "").slice(0, MAX_CONTEXT_CHARS)}\n"""`;
+        input = action === "ask" ? `${quoted}\n\nQuestion: ${question}` : quoted;
+    } else if (code) {
         const source = String(code.text || "").slice(0, MAX_CONTEXT_CHARS);
         const language = String(code.language || "").replace(/[^\w+#. -]/g, "").slice(0, 30);
         const quoted = `Code${language ? ` (${language})` : ""}:\n"""\n${source}\n"""`;
@@ -241,7 +265,9 @@ async function ask({ action, question, text, target, image, chart, code }) {
                 system_instruction: instructions[action](target),
                 input,
                 generation_config: {
-                    max_output_tokens: (code
+                    max_output_tokens: (math
+                        ? MATH_MAX_OUTPUT_TOKENS
+                        : code
                         ? CODE_MAX_OUTPUT_TOKENS
                         : chart ? CHART_MAX_OUTPUT_TOKENS : image ? IMAGE_MAX_OUTPUT_TOKENS : MAX_OUTPUT_TOKENS)[action],
                     thinking_level: "low",
@@ -274,7 +300,7 @@ async function ask({ action, question, text, target, image, chart, code }) {
         .trim();
     if (!answer) throw new AskError("Gemini didn't return an answer. Try rephrasing the question.");
     // Code answers are read aloud; drop markdown backticks around code names.
-    return code ? answer.replace(/`+/g, "") : answer;
+    return code || math ? answer.replace(/`+/g, "") : answer;
 }
 
 browser.runtime.onMessage.addListener((request) => {
@@ -284,6 +310,7 @@ browser.runtime.onMessage.addListener((request) => {
     const image = request.image && typeof request.image.src === "string" ? { src: request.image.src } : null;
     const chart = request.chart && typeof request.chart === "object" ? request.chart : null;
     const code = request.code && typeof request.code.text === "string" ? request.code : null;
+    const math = request.math && typeof request.math.text === "string" ? request.math : null;
     return ask({
         action: String(request.action || "ask"),
         question: String(request.question || "").trim(),
@@ -292,6 +319,7 @@ browser.runtime.onMessage.addListener((request) => {
         image,
         chart,
         code,
+        math,
     }).then(
         (answer) => ({ ok: true, answer }),
         (error) => {
