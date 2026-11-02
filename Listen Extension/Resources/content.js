@@ -1196,7 +1196,7 @@
 
     let lastReadText = ""; // the page text being (or last) read, for the chat box while reading
     let lastReadRange = null;
-    let readingAnswer = false; // whether the current reading is the answer in the ask panel
+    let readingAnswer = null; // the chat answer being read aloud, if any
 
     // Reads `range` aloud with word highlighting; `text` is the fallback if it can't be mapped.
     async function read(range, text, isAnswer) {
@@ -1219,8 +1219,8 @@
             { onWord: highlighter.showWord, onWordTimingUnavailable: highlighter.clear, onEnd: onReadingEnded },
             lang
         );
-        readingAnswer = Boolean(isAnswer);
-        if (askPanel) setAnswerSpeakIcon(readingAnswer);
+        readingAnswer = isAnswer || null;
+        updateSpeakButtons();
         setButtonIcon("stop");
     }
 
@@ -1245,26 +1245,26 @@
         const lang = language.detect(null, text);
         highlighter.outline(element);
         speech.speak(text, { onWord() {}, onWordTimingUnavailable() {}, onEnd: onReadingEnded }, lang);
-        readingAnswer = false;
-        if (askPanel) setAnswerSpeakIcon(false);
+        readingAnswer = null;
+        updateSpeakButtons();
         setButtonIcon("stop");
     }
 
     function onReadingEnded() {
         highlighter.clear();
-        readingAnswer = false;
-        if (askPanel) setAnswerSpeakIcon(false);
+        readingAnswer = null;
+        updateSpeakButtons();
         setButtonIcon("listen");
         // If nothing is selected or hovered by the time reading ends, the bar has nothing left to do.
         if (!readSelection() && !(imageTarget && imageTarget.matches(":hover"))) hideBar();
     }
 
     // ---------- Floating bar (isolated in a Shadow DOM so host page CSS can't touch it) ----------
-    // A row of buttons: speaker (listen / stop), speed and chat (ask). The ask panel opens below the row.
+    // A row of buttons: speaker (listen / stop), speed and chat (attaches the selection to the chat; see Chat).
 
     const BUTTON_SIZE = 30;
     const OFFSET = 6;
-    const ASK_PANEL_WIDTH = 320;
+    const ASK_PANEL_WIDTH = 320; // the note under the bar
 
     const ICONS = {
         listen: { svg: "speaker", label: "Read selected text aloud", title: "Listen" },
@@ -1343,22 +1343,6 @@
         button:disabled { opacity: 0.4; cursor: default; transform: none; }
         button[hidden] { display: none; }
 
-        .panel {
-            position: absolute;
-            top: ${BUTTON_SIZE + 8}px;
-            left: 0;
-            box-sizing: border-box;
-            width: ${ASK_PANEL_WIDTH}px;
-            padding: 10px;
-            border-radius: 12px;
-            background: #ffffff;
-            color: #1c1c1e;
-            box-shadow: 0 6px 24px rgba(0, 0, 0, 0.25);
-            font: 400 14px/1.45 -apple-system, "Helvetica Neue", sans-serif;
-            text-align: left;
-        }
-        .panel.above { top: auto; bottom: ${BUTTON_SIZE + 8}px; }
-        .panel[hidden], .panel [hidden] { display: none; }
         .ask-row { display: flex; gap: 6px; align-items: center; }
         .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
         button.chip {
@@ -1429,34 +1413,6 @@
         }
         @keyframes listen-spin { to { transform: rotate(360deg); } }
         .status.error { color: #c62828; }
-        .answer-row { display: flex; gap: 8px; align-items: flex-start; margin-top: 8px; }
-        .answer {
-            flex: 1;
-            max-height: 240px;
-            overflow: auto;
-            white-space: pre-wrap;
-            user-select: text;
-            -webkit-user-select: text;
-        }
-        .answer-tools { position: relative; flex: none; display: flex; flex-direction: column; gap: 6px; }
-        button.speak, button.copy {
-            width: 24px;
-            height: 24px;
-            box-shadow: none;
-        }
-        button.speak.stop { font-size: 11px; }
-        .copied {
-            position: absolute;
-            top: 30px;
-            right: 30px;
-            padding: 4px 8px;
-            border-radius: 10px;
-            background: #1c1c1e;
-            color: #ffffff;
-            font: 500 11px/1 -apple-system, "Helvetica Neue", sans-serif;
-            white-space: nowrap;
-            pointer-events: none;
-        }
     `;
 
     let host = null;
@@ -1516,8 +1472,7 @@
         askButton.addEventListener("click", (event) => {
             event.preventDefault();
             event.stopPropagation();
-            if (isAskOpen()) closeAsk();
-            else openAsk();
+            openAsk();
         });
 
         bar.append(button, speedButton, askButton);
@@ -1564,8 +1519,8 @@
         selectedText = "";
         selectedRange = null;
         selectedCodeBlock = null;
-        // While reading, asking or describing an image, keep the bar on screen.
-        if (isAskOpen() || imageBusy) return;
+        // While reading or describing an image, keep the bar on screen.
+        if (imageBusy) return;
         if (speech.isSpeaking()) {
             setButtonIcon("stop");
             return;
@@ -1626,20 +1581,22 @@
 
     // ---------- Settings (chosen in the toolbar popup, kept in browser.storage.local) ----------
     // voice: a voiceURI, or "" for the best available. showImageButtons / showLinkButtons: hover bars on
-    // images and charts / links. aiFeatures: off hides the chat button and nothing is ever sent to Gemini.
+    // images and charts / links. aiFeatures: off hides the chat button and bubble, and nothing is ever sent to
+    // Gemini. showChatBubble: the chat bubble in the page's corner.
 
-    const settings = { voice: "", showImageButtons: false, showLinkButtons: false, aiFeatures: true };
+    const settings = { voice: "", showImageButtons: false, showLinkButtons: false, aiFeatures: true, showChatBubble: true };
 
     function applySettings(values) {
         if (typeof values.voice === "string") {
             settings.voice = values.voice;
             speech.setVoice(values.voice);
         }
-        for (const key of ["showImageButtons", "showLinkButtons", "aiFeatures"]) {
+        for (const key of ["showImageButtons", "showLinkButtons", "aiFeatures", "showChatBubble"]) {
             if (typeof values[key] === "boolean") settings[key] = values[key];
         }
         if (askButton) askButton.hidden = !settings.aiFeatures;
         if (!settings.aiFeatures && isAskOpen()) closeAsk();
+        updateBubble();
     }
 
     try {
@@ -1657,12 +1614,23 @@
         console.warn("[Listen] Settings storage unavailable:", e);
     }
 
-    // ---------- Ask panel (chat button: questions and requests about the highlighted text, answered by Gemini) ----------
-    // The question is sent to background.js, which holds the API key and calls Gemini.
+    // ---------- Chat (the chat button on the bar, and the chat bubble in the page's corner) ----------
+    // One conversation per tab. The bar's chat button attaches the highlighted text (or the hovered image,
+    // chart, link, code or maths) to it as a quoted chip; quick-action chips and typed messages ask Gemini
+    // about it through background.js, with the last few turns as context. background.js keeps the
+    // conversation for the tab until "New chat". The panel and the bubble can be dragged anywhere on
+    // screen; their last positions are kept in browser.storage.local.
 
     const ASK_TIMEOUT_MS = 45000;
+    const CHAT_PANEL_WIDTH = 340;
+    const BUBBLE_SIZE = 44;
+    const EDGE = 8; // px kept between the chat and the window's edges
+    const DRAG_THRESHOLD = 4; // px a press must move to count as a drag rather than a click
+    const HISTORY_TURNS = 6; // earlier turns sent along as context: the last three questions and answers
+    const HISTORY_TURN_CHARS = 2000;
+    const MAX_TURNS_KEPT = 40;
 
-    // Quick actions: [action sent to background.js, label, tooltip], for text and for images.
+    // Quick actions: [action sent to background.js, label, tooltip], per kind of attachment.
     const CHIPS = [
         ["summarize", "Summarize", "Short summary of the highlighted text"],
         ["translate", "Translate", "Translate the highlighted text"],
@@ -1672,6 +1640,16 @@
         ["explain", "Explain", "Explain the maths simply"],
         ["solve", "Solve step by step", "Work through it step by step"],
         ["readit", "Read it", "Read the maths aloud"],
+    ];
+    const MATH_PROBLEM_CHIPS = [
+        ["hint", "Hint", "One nudge toward the next step, without the answer"],
+        ["solve", "Solve step by step", "Work through it step by step"],
+        ["explain", "Explain", "Explain the problem simply"],
+    ];
+    const MATH_ANSWER_CHIPS = [
+        ["check", "Check my answer", "Check whether the answer shown is right"],
+        ["hint", "Hint", "One nudge toward the next step, without the answer"],
+        ["explain", "Explain", "Explain the problem simply"],
     ];
     const IMAGE_CHIPS = [
         ["describe", "Describe", "Describe the image"],
@@ -1704,13 +1682,47 @@
         return isMailSite() || GREETING.test(text) || SIGN_OFF.test(text.trim()) || MAIL_HEADER.test(text);
     }
 
-    let askPanel = null; // { panel, input, send, chips, status, answerRow, answer, speak, copy, copied }
-    let askContext = ""; // the highlighted text questions are about
+    // ----- Maths problems -----
+    // A maths problem (an equation to solve, or a word problem with a question) gets Hint / Solve step by
+    // step / Explain; with an answer already written down, Check my answer / Hint / Explain. Other maths
+    // (a formula in an article) keeps Explain / Solve step by step / Read it.
+
+    // A letter next to a number or an operator, then "=": "2x + 3 = 11", "x² − 4 = 0".
+    const EQUATION = /(\d\s*[a-z]\b|\b[a-z]\s*[\^²³]|\b[a-z]\s*[+\-−*×÷/]\s*\d|\d\s*[+\-−*×÷/]\s*[a-z]\b)[^=\n]{0,60}=/i;
+    // A sum with its result written down: "12 × 7 = 84".
+    const SUM_WITH_RESULT = /\d\s*[+\-−*×÷/]\s*\(?\d[\d\s+\-−*×÷/().]*=\s*[-−]?\d/;
+    const QUESTION_CUE =
+        /\?|\b(find|solve|calculate|work out|evaluate|simplify|factori[sz]e|expand|determine|how (many|much|long|far|fast)|what is)\b/i;
+    const MATHS_WORDS =
+        /%|\b(total|sum|difference|product|altogether|each|per|times|twice|half|percent|average|mean|area|perimeter|volume|speed|rate|costs?|price|fraction|ratio|remain(s|ing)?|left|more than|less than|equation)\b/i;
+    // "Answer: 12", "my answer is 7", or a line ending "x = 4".
+    const ANSWER_SHOWN = /\b(answer|ans|solution|result)\s*(is\b|:|=)|(^|[\s,;:])[a-z]\s*=\s*[-−]?\d+([.,/]\d+)?\s*[.!]?\s*$/im;
+
+    // "problem", "answered", or null when the text isn't a maths problem.
+    function mathsProblem(text) {
+        if (text.length > 1500) return null;
+        const numbers = (text.match(/\d+(\.\d+)?/g) || []).length;
+        const question = QUESTION_CUE.test(text);
+        const sum = SUM_WITH_RESULT.test(text);
+        const isProblem =
+            EQUATION.test(text) ||
+            sum ||
+            (numbers >= 2 && question && MATHS_WORDS.test(text)) ||
+            (numbers >= 1 && question && /[+\-−*×÷/^=²³√]/.test(text));
+        if (!isProblem) return null;
+        return sum || ANSWER_SHOWN.test(text) ? "answered" : "problem";
+    }
+
+    // ----- The attachment: what the conversation is currently about -----
+
+    let askKind = null; // "text", "email", "code", "math", "image", "chart", "link", or null for nothing attached
+    let askContext = ""; // the attached text
     let askRange = null; // where that text is on the page, if known
-    let askImage = null; // the image or chart questions are about, instead of text
-    let askKind = "text"; // "text", "email", "code", "math", "image", "chart" or "link"
-    let askCode = null; // the code block questions are about, when askKind is "code"
-    let askRequest = 0; // id of the latest question; older answers are ignored
+    let askImage = null; // the attached image, chart, link or hovered equation, instead of text
+    let askCode = null; // the code block, when askKind is "code"
+    let askLanguage = ""; // its programming language
+    let askMathMode = "formula"; // for maths: "problem", "answered" or "formula"
+    let askRequest = 0; // id of the conversation; "New chat" makes answers still on their way stale
 
     // While the box is open the text it's about stays softly marked, since focusing the question
     // field clears the page selection. Uses the CSS Custom Highlight API; nothing in the page changes.
@@ -1794,55 +1806,261 @@
         // storage unavailable; the browser language is used
     }
 
-    function createAskPanel() {
+    // ----- Conversation -----
+
+    let turns = []; // [{ role: "user" | "model", text, lang? }]
+    let chatLoaded = null; // promise of loading this tab's conversation from background.js
+
+    const KIND_LABELS = {
+        text: "Text", email: "Message", code: "Code", image: "Image", chart: "Chart", link: "Link",
+        problem: "Maths problem", answered: "Maths and your answer", formula: "Maths",
+    };
+
+    function snippet(text, max) {
+        const flat = text.replace(/\s+/g, " ").trim();
+        return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+    }
+
+    // Only text-like attachments are kept with the conversation: images, charts and links need the page.
+    function savableAttachment() {
+        if (!["text", "email", "code", "math"].includes(askKind) || askImage) return null;
+        const context = askKind === "math" && askRange ? mathContext(askRange) : askContext;
+        return { kind: askKind, context: context.slice(0, 20000), language: askLanguage, mathMode: askMathMode };
+    }
+
+    function saveChat() {
+        const chat = turns.length || askKind ? { turns: turns.slice(-MAX_TURNS_KEPT), attachment: savableAttachment() } : null;
+        try {
+            browser.runtime.sendMessage({ type: "listen:chat-save", chat }).catch(() => {});
+        } catch (e) {
+            // not kept; the conversation still lasts as long as the page
+        }
+    }
+
+    function loadChat() {
+        chatLoaded ||= (async () => {
+            let chat = null;
+            try {
+                chat = await browser.runtime.sendMessage({ type: "listen:chat-load" });
+            } catch (e) {
+                // nothing kept for this tab
+            }
+            if (!chat || !Array.isArray(chat.turns)) return;
+            turns = chat.turns.filter((t) => (t.role === "user" || t.role === "model") && typeof t.text === "string");
+            const saved = chat.attachment;
+            if (saved && typeof saved.context === "string" && ["text", "email", "code", "math"].includes(saved.kind)) {
+                setAttachment({ kind: saved.kind, context: saved.context, language: saved.language || "", mathMode: saved.mathMode });
+            }
+            renderTurns();
+        })();
+        return chatLoaded;
+    }
+
+    // The last few turns, shortened, as context for the next request.
+    function historyForRequest() {
+        return turns.slice(-HISTORY_TURNS).map((t) => ({ role: t.role, text: t.text.slice(0, HISTORY_TURN_CHARS) }));
+    }
+
+    // ----- Building the chat (its own Shadow DOM host, separate from the bar) -----
+
+    const CHAT_CSS = `
+        button.bubble {
+            position: fixed;
+            width: ${BUBBLE_SIZE}px;
+            height: ${BUBBLE_SIZE}px;
+            touch-action: none;
+            box-shadow: 0 4px 14px rgba(0, 0, 0, 0.3);
+        }
+        button.bubble.dragging { transform: scale(1.08); cursor: grabbing; transition: none; }
+        .panel {
+            position: fixed;
+            box-sizing: border-box;
+            display: flex;
+            flex-direction: column;
+            width: ${CHAT_PANEL_WIDTH}px;
+            max-height: calc(100vh - ${EDGE * 2}px);
+            border-radius: 14px;
+            background: #ffffff;
+            color: #1c1c1e;
+            box-shadow: 0 8px 30px rgba(0, 0, 0, 0.28);
+            font: 400 14px/1.45 -apple-system, "Helvetica Neue", sans-serif;
+            text-align: left;
+            overflow: hidden;
+        }
+        .panel.dragging { box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35); }
+        .panel[hidden], .panel [hidden], button.bubble[hidden] { display: none; }
+        .chat-head {
+            flex: none;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 8px 8px 8px 12px;
+            background: #f2f2f7;
+            cursor: grab;
+            touch-action: none;
+            user-select: none;
+            -webkit-user-select: none;
+        }
+        .panel.dragging .chat-head { cursor: grabbing; }
+        .chat-title { flex: 1; font-weight: 600; font-size: 13px; }
+        button.head-button {
+            width: auto;
+            height: 24px;
+            padding: 0 10px;
+            border-radius: 12px;
+            background: #ffffff;
+            color: #1c1c1e;
+            font: 500 12px/1 -apple-system, "Helvetica Neue", sans-serif;
+            box-shadow: none;
+        }
+        button.head-button.close { width: 24px; padding: 0; font-size: 16px; }
+        button.head-button:hover { background: #e5e5ea; transform: none; }
+        .chat-body { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; padding: 10px; gap: 8px; }
+        .attachment {
+            flex: none;
+            display: flex;
+            align-items: flex-start;
+            gap: 6px;
+            padding: 6px 8px;
+            border-left: 3px solid #0a84ff;
+            border-radius: 8px;
+            background: rgba(10, 132, 255, 0.08);
+            font-size: 13px;
+            line-height: 1.35;
+        }
+        .attachment-text {
+            flex: 1;
+            min-width: 0;
+            overflow: hidden;
+            display: -webkit-box;
+            -webkit-box-orient: vertical;
+            -webkit-line-clamp: 3;
+        }
+        .attachment-kind { display: block; color: #0a64c8; font-size: 11px; font-weight: 600; }
+        button.detach {
+            width: 18px;
+            height: 18px;
+            background: transparent;
+            color: #6e6e73;
+            font-size: 14px;
+            box-shadow: none;
+        }
+        button.detach:hover { color: #1c1c1e; transform: none; }
+        .messages {
+            flex: 1 1 auto;
+            min-height: 0;
+            max-height: 340px;
+            overflow: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+        .messages:empty { display: none; }
+        .msg { white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; -webkit-user-select: text; }
+        .msg.user {
+            align-self: flex-end;
+            max-width: 85%;
+            padding: 6px 10px;
+            border-radius: 12px 12px 4px 12px;
+            background: #1c1c1e;
+            color: #ffffff;
+        }
+        .msg.model { display: flex; gap: 8px; align-items: flex-start; }
+        .answer { flex: 1; min-width: 0; }
+        .answer-tools { position: relative; flex: none; display: flex; gap: 6px; }
+        button.speak, button.copy { width: 24px; height: 24px; box-shadow: none; }
+        button.speak.stop { font-size: 11px; }
+        .copied {
+            position: absolute;
+            top: 30px;
+            right: 0;
+            padding: 4px 8px;
+            border-radius: 10px;
+            background: #1c1c1e;
+            color: #ffffff;
+            font: 500 11px/1 -apple-system, "Helvetica Neue", sans-serif;
+            white-space: nowrap;
+            pointer-events: none;
+        }
+        .empty { margin: 0; color: #6e6e73; font-size: 13px; }
+        .status { margin-top: 0; }
+        .chips { margin-bottom: 0; }
+        .chips:empty { display: none; }
+    `;
+
+    let chatHost = null;
+    let chatShadow = null;
+    let chat = null; // { panel, head, bubble, attachment, attachmentKind, attachmentText, messages, empty, status, chipRow, chips, input, send }
+    let panelPosition = null; // { x, y } last chosen by dragging, from browser.storage.local
+    let bubblePosition = null;
+
+    function chatButton(className, label, content) {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.className = className;
+        b.title = label;
+        b.setAttribute("aria-label", label);
+        b.append(content);
+        return b;
+    }
+
+    function createChat() {
+        chatHost = document.createElement("listen-chat-root");
+        chatHost.style.cssText = "all: initial; position: fixed; left: 0; top: 0; width: 0; height: 0; z-index: 2147483647;";
+        chatShadow = chatHost.attachShadow({ mode: "closed" });
+        const style = document.createElement("style");
+        style.textContent = BAR_CSS + CHAT_CSS;
+
+        const bubble = chatButton("bubble", "Open Listen chat", svgIcon("chat", 20));
+
         const panel = document.createElement("div");
         panel.className = "panel";
         panel.hidden = true;
+        panel.setAttribute("role", "dialog");
+        panel.setAttribute("aria-label", "Listen chat");
 
+        const head = document.createElement("div");
+        head.className = "chat-head";
+        const title = document.createElement("span");
+        title.className = "chat-title";
+        title.textContent = "Listen";
+        const newChat = chatButton("head-button", "New chat", "New chat");
+        const close = chatButton("head-button close", "Close", "×");
+        head.append(title, newChat, close);
+
+        const body = document.createElement("div");
+        body.className = "chat-body";
+        const attachment = document.createElement("div");
+        attachment.className = "attachment";
+        attachment.hidden = true;
+        const attachmentText = document.createElement("div");
+        attachmentText.className = "attachment-text";
+        const detach = chatButton("detach", "Remove from the chat", "×");
+        attachment.append(attachmentText, detach);
+
+        const messages = document.createElement("div");
+        messages.className = "messages";
+        const empty = document.createElement("p");
+        empty.className = "empty";
+        empty.textContent = "Ask anything. To ask about part of the page, highlight it and press the chat button.";
+        const status = document.createElement("div");
+        status.className = "status";
+        status.hidden = true;
         const chips = document.createElement("div");
         chips.className = "chips";
-
         const row = document.createElement("div");
         row.className = "ask-row";
         const input = document.createElement("input");
         input.type = "text";
-        input.setAttribute("aria-label", "Question or request about the highlighted text");
-        const send = document.createElement("button");
-        send.type = "button";
-        send.className = "send";
-        send.textContent = "↑";
-        send.title = "Ask";
-        send.setAttribute("aria-label", "Ask");
+        input.setAttribute("aria-label", "Message");
+        const send = chatButton("send", "Send", "↑");
         row.append(input, send);
+        body.append(attachment, messages, empty, status, chips, row);
+        panel.append(head, body);
 
-        const status = document.createElement("div");
-        status.className = "status";
-        status.hidden = true;
-
-        const answerRow = document.createElement("div");
-        answerRow.className = "answer-row";
-        answerRow.hidden = true;
-        const answer = document.createElement("div");
-        answer.className = "answer";
-        const tools = document.createElement("div");
-        tools.className = "answer-tools";
-        const speak = document.createElement("button");
-        speak.type = "button";
-        speak.className = "speak";
-        const copy = document.createElement("button");
-        copy.type = "button";
-        copy.className = "copy";
-        const copied = document.createElement("div");
-        copied.className = "copied";
-        copied.setAttribute("role", "status");
-        copied.hidden = true;
-        tools.append(speak, copy, copied);
-        answerRow.append(answer, tools);
-
-        panel.append(chips, row, status, answerRow);
-        askPanel = { panel, input, send, chipRow: chips, chips: [], status, answerRow, answer, speak, copy, copied };
-        setAnswerSpeakIcon(false);
-        showCopied(null);
+        chatShadow.append(style, bubble, panel);
+        document.documentElement.appendChild(chatHost);
+        chat = { panel, head, bubble, attachment, attachmentText, messages, empty, status, chipRow: chips, chips: [], input, send };
 
         // Keep typing out of the page (site shortcuts) and out of our own page-level key handlers.
         for (const type of ["keydown", "keyup", "keypress"]) {
@@ -1858,136 +2076,375 @@
             }
         });
         send.addEventListener("click", () => sendQuestion());
-        speak.addEventListener("click", () => {
-            if (readingAnswer) speech.stop();
-            else readAnswer();
+        newChat.addEventListener("click", () => startNewChat());
+        close.addEventListener("click", () => closeAsk());
+        detach.addEventListener("click", () => {
+            clearAttachment();
+            saveChat();
+            input.focus();
         });
-        copy.addEventListener("click", () => copyAnswer());
-        answer.addEventListener("scroll", () => highlighter.relayout(), { passive: true });
-        return panel;
+        bubble.addEventListener("click", () => {
+            if (bubble.dataset.dragged) {
+                delete bubble.dataset.dragged;
+                return;
+            }
+            if (isAskOpen()) closeAsk();
+            else openChat("bubble");
+        });
+        messages.addEventListener("scroll", () => highlighter.relayout(), { passive: true });
+        makeDraggable(panel, head, "chatPanelPos", (pos) => (panelPosition = pos));
+        makeDraggable(bubble, bubble, "chatBubblePos", (pos) => (bubblePosition = pos));
+        placeBubble();
+        updateBubble();
     }
 
-    function renderChips(list) {
-        askPanel.chips = list.map(([action, label, title]) => {
-            const chip = document.createElement("button");
-            chip.type = "button";
-            chip.className = "chip";
-            chip.textContent = label;
-            chip.title = title;
-            chip.addEventListener("click", () => sendChip(action));
-            return chip;
-        });
-        askPanel.chipRow.replaceChildren(...askPanel.chips);
+    function isChatEvent(event) {
+        return chatHost !== null && event.composedPath().includes(chatHost);
     }
+
+    // ----- Dragging (smooth, kept fully on screen, last position remembered) -----
+
+    function clampPosition(element, x, y) {
+        const viewWidth = document.documentElement.clientWidth || window.innerWidth;
+        const viewHeight = window.innerHeight;
+        return {
+            x: Math.round(Math.max(EDGE, Math.min(x, viewWidth - element.offsetWidth - EDGE))),
+            y: Math.round(Math.max(EDGE, Math.min(y, viewHeight - element.offsetHeight - EDGE))),
+        };
+    }
+
+    function place(element, x, y) {
+        const pos = clampPosition(element, x, y);
+        element.style.left = `${pos.x}px`;
+        element.style.top = `${pos.y}px`;
+        return pos;
+    }
+
+    function keepOnScreen(element) {
+        if (element.hidden) return;
+        place(element, parseFloat(element.style.left) || 0, parseFloat(element.style.top) || 0);
+    }
+
+    // Lets `element` (position: fixed) be dragged by `handle`; a press on another button inside the handle
+    // is left alone. Moves follow the pointer once per frame. The final position is saved under `key`.
+    function makeDraggable(element, handle, key, remember) {
+        handle.addEventListener("pointerdown", (event) => {
+            const pressed = event.target.closest && event.target.closest("button");
+            if (event.button !== 0 || (pressed && pressed !== handle)) return;
+            event.preventDefault();
+            const rect = element.getBoundingClientRect();
+            const start = { x: event.clientX, y: event.clientY, left: rect.left, top: rect.top };
+            let moved = false;
+            let frame = 0;
+            let target = null;
+            handle.setPointerCapture(event.pointerId);
+            const move = (e) => {
+                const dx = e.clientX - start.x;
+                const dy = e.clientY - start.y;
+                if (!moved && Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
+                if (!moved) {
+                    moved = true;
+                    element.classList.add("dragging");
+                }
+                target = { x: start.left + dx, y: start.top + dy };
+                frame ||= requestAnimationFrame(() => {
+                    frame = 0;
+                    place(element, target.x, target.y);
+                });
+            };
+            const end = () => {
+                handle.removeEventListener("pointermove", move);
+                handle.removeEventListener("pointerup", end);
+                handle.removeEventListener("pointercancel", end);
+                if (!moved) return;
+                cancelAnimationFrame(frame);
+                frame = 0;
+                const pos = place(element, target.x, target.y);
+                element.classList.remove("dragging");
+                element.dataset.dragged = "1"; // the click that follows a drag is ignored
+                setTimeout(() => delete element.dataset.dragged, 0);
+                remember(pos);
+                try {
+                    browser.storage.local.set({ [key]: pos }).catch(() => {});
+                } catch (e) {
+                    // not remembered; it stays where it is on this page
+                }
+            };
+            handle.addEventListener("pointermove", move);
+            handle.addEventListener("pointerup", end);
+            handle.addEventListener("pointercancel", end);
+        });
+    }
+
+    function placeBubble() {
+        const { bubble } = chat;
+        if (bubblePosition) place(bubble, bubblePosition.x, bubblePosition.y);
+        else place(bubble, Infinity, Infinity); // bottom-right corner
+    }
+
+    // The bubble shows on every page unless it's switched off in the popup or AI features are off.
+    function updateBubble() {
+        if (!chat) return;
+        chat.bubble.hidden = !settings.showChatBubble || !settings.aiFeatures;
+        if (!chat.bubble.hidden) placeBubble();
+    }
+
+    // Where the panel opens: where it was last dragged to, else next to the bar or above the bubble.
+    function placePanel(from) {
+        const { panel, bubble } = chat;
+        if (panelPosition) {
+            place(panel, panelPosition.x, panelPosition.y);
+        } else if (from === "bar" && host && host.style.display !== "none") {
+            const bar = host.getBoundingClientRect();
+            place(panel, bar.left, bar.bottom + 8);
+        } else {
+            const b = bubble.getBoundingClientRect();
+            place(panel, b.right - panel.offsetWidth, b.top - panel.offsetHeight - 8);
+        }
+    }
+
+    try {
+        browser.storage.local.get(["chatPanelPos", "chatBubblePos"]).then((items) => {
+            const valid = (p) => p && Number.isFinite(p.x) && Number.isFinite(p.y);
+            if (valid(items.chatPanelPos)) panelPosition = items.chatPanelPos;
+            if (valid(items.chatBubblePos)) {
+                bubblePosition = items.chatBubblePos;
+                if (chat) placeBubble();
+            }
+        }, () => {});
+    } catch (e) {
+        // default positions
+    }
+
+    // ----- Opening and closing -----
 
     function isAskOpen() {
-        return askPanel !== null && !askPanel.panel.hidden;
+        return chat !== null && !chat.panel.hidden;
     }
 
-    function openAsk() {
+    async function openChat(from) {
+        if (!settings.aiFeatures) return;
+        if (!chat) createChat();
+        await loadChat();
+        const wasOpen = isAskOpen();
+        chat.panel.hidden = false;
+        renderAttachment();
+        renderTurns();
+        if (!wasOpen) placePanel(from);
+        keepOnScreen(chat.panel);
+        chat.input.focus();
+    }
+
+    function closeAsk() {
+        if (!isAskOpen()) return;
+        if (readingAnswer) speech.stop();
+        chat.panel.hidden = true;
+        unmarkAsked();
+    }
+
+    function startNewChat() {
+        askRequest++; // answers still on their way belong to the old chat
+        if (readingAnswer) speech.stop();
+        turns = [];
+        clearAttachment();
+        setAskBusy(false);
+        chat.status.hidden = true;
+        renderTurns();
+        saveChat();
+        chat.input.focus();
+    }
+
+    // The bar's chat button: attaches the selection (or the hovered image, chart, link or equation) and
+    // opens the chat. With nothing to attach it opens or closes the chat.
+    async function openAsk() {
         const context = selectedText || lastReadText;
-        if ((!imageTarget && !context) || !host) return;
-        askImage = imageTarget;
-        askCode = !askImage && selectedText ? selectedCodeBlock : null;
-        const askMath = !askImage && !askCode && selectedText && rangeHasMath(selectedRange, selectedText);
-        askKind = askImage ? imageKind : askCode ? "code" : askMath ? "math" : looksLikeMessage(context) ? "email" : "text";
-        askContext = askImage ? "" : context;
-        askRange = askImage ? null : selectedText ? selectedRange : lastReadRange;
-        markAsked(askRange);
-        if (!askPanel) barShadow.append(createAskPanel());
-        if (note) note.hidden = true;
-        const chips = {
-            text: CHIPS, email: EMAIL_CHIPS, code: CODE_CHIPS, math: MATH_CHIPS, image: IMAGE_CHIPS, chart: CHART_CHIPS,
-            link: LINK_CHIPS,
+        if (!imageTarget && !context) {
+            if (isAskOpen()) closeAsk();
+            else openChat("bar");
+            return;
+        }
+        const image = imageTarget;
+        const code = !image && selectedText ? selectedCodeBlock : null;
+        const range = image ? null : selectedText ? selectedRange : lastReadRange;
+        let kind = image ? imageKind : code ? "code" : "text";
+        let mathMode = "formula";
+        if (kind === "text") {
+            const problem = mathsProblem(context);
+            if (problem || rangeHasMath(range, context)) {
+                kind = "math";
+                mathMode = problem || "formula";
+            } else if (looksLikeMessage(context)) {
+                kind = "email";
+            }
+        }
+        await openChat("bar");
+        setAttachment({
+            kind, context: image ? "" : context, range, image, code,
+            language: code ? codeLanguage(code) : "", mathMode,
+        });
+        saveChat();
+        chat.input.focus();
+    }
+
+    function setAttachment({ kind, context, range = null, image = null, code = null, language = "", mathMode = "formula" }) {
+        askKind = kind;
+        askContext = context;
+        askRange = range;
+        askImage = image;
+        askCode = code;
+        askLanguage = language;
+        askMathMode = kind === "math" && !image ? mathMode || "formula" : "formula";
+        if (isAskOpen()) markAsked(askRange);
+        if (chat) renderAttachment();
+    }
+
+    function clearAttachment() {
+        setAttachment({ kind: null, context: "" });
+        unmarkAsked();
+    }
+
+    function attachmentLabel() {
+        if (askKind === "image") return (askImage && imageInfo(askImage).alt) || "An image on the page";
+        if (askKind === "chart") return captionOf(askImage) || "A chart on the page";
+        if (askKind === "link") {
+            const url = linkUrl(askImage);
+            return url ? `${url.hostname}${url.pathname === "/" ? "" : url.pathname}` : "A link";
+        }
+        if (askKind === "math" && askImage) return mathSpeech(askImage);
+        return askContext;
+    }
+
+    function renderAttachment() {
+        const { attachment, attachmentText, input } = chat;
+        attachment.hidden = !askKind;
+        const chipLists = {
+            text: CHIPS, email: EMAIL_CHIPS, code: CODE_CHIPS, image: IMAGE_CHIPS, chart: CHART_CHIPS, link: LINK_CHIPS,
+            math: { problem: MATH_PROBLEM_CHIPS, answered: MATH_ANSWER_CHIPS, formula: MATH_CHIPS }[askMathMode],
         };
+        renderChips(askKind ? chipLists[askKind] : []);
         // Text can be asked about or worked on ("write a reply", "make this shorter").
         const placeholders = {
             text: "Ask anything, or say what you need…", email: "Ask, or say what to write…",
             code: "Ask about the code…", math: "Ask about the maths…", image: "Ask about the image…",
             chart: "Ask about the chart…", link: "Ask about the linked page…",
         };
-        renderChips(chips[askKind]);
-        askPanel.input.placeholder = placeholders[askKind];
-        askRequest++;
-        askPanel.input.value = "";
-        askPanel.status.hidden = true;
-        askPanel.answerRow.hidden = true;
-        askPanel.panel.hidden = false;
-        placeAskPanel();
-        askPanel.input.focus();
+        input.placeholder = askKind ? placeholders[askKind] : "Ask anything…";
+        chat.empty.hidden = turns.length > 0 || Boolean(askKind);
+        if (!askKind) return;
+        const kind = document.createElement("span");
+        kind.className = "attachment-kind";
+        kind.textContent = askKind === "math" ? KIND_LABELS[askMathMode] : KIND_LABELS[askKind];
+        const isQuote = !["image", "chart", "link"].includes(askKind);
+        const label = snippet(attachmentLabel(), 140);
+        attachmentText.replaceChildren(kind, isQuote ? `“${label}”` : label);
+        attachmentText.title = snippet(attachmentLabel(), 600);
+        if (isAskOpen()) markAsked(askRange);
     }
 
-    function closeAsk() {
-        if (!isAskOpen()) return;
-        askRequest++; // ignore an answer still on its way
-        if (readingAnswer) speech.stop();
-        askPanel.panel.hidden = true;
-        unmarkAsked();
+    function renderChips(list) {
+        chat.chips = list.map(([action, label, title]) => {
+            const chip = document.createElement("button");
+            chip.type = "button";
+            chip.className = "chip";
+            chip.textContent = label;
+            chip.title = title;
+            chip.addEventListener("click", () => sendChip(action, label));
+            return chip;
+        });
+        chat.chipRow.replaceChildren(...chat.chips);
+        setAskBusy(askBusy);
     }
 
-    // Opens below the bar, or above it if there's no room; shifted left to stay inside the window.
-    function placeAskPanel() {
-        const { panel } = askPanel;
-        panel.style.left = "0px";
-        panel.classList.remove("above");
-        const barRect = host.getBoundingClientRect();
-        const rect = panel.getBoundingClientRect();
-        const viewWidth = document.documentElement.clientWidth;
-        const viewHeight = document.documentElement.clientHeight;
-        const overflowRight = rect.right - (viewWidth - OFFSET);
-        if (overflowRight > 0) panel.style.left = `${-Math.min(overflowRight, barRect.left - OFFSET)}px`;
-        if (rect.bottom > viewHeight - OFFSET && barRect.top - rect.height - OFFSET > 0) panel.classList.add("above");
+    // ----- Messages -----
+
+    function renderTurns() {
+        if (!chat) return;
+        chat.messages.replaceChildren(...turns.map(turnElement));
+        chat.empty.hidden = turns.length > 0 || Boolean(askKind);
+        chat.messages.scrollTop = chat.messages.scrollHeight;
+        updateSpeakButtons();
+        keepOnScreen(chat.panel);
+    }
+
+    function turnElement(turn) {
+        const msg = document.createElement("div");
+        msg.className = `msg ${turn.role}`;
+        if (turn.role === "user") {
+            msg.textContent = turn.text;
+            return msg;
+        }
+        const answer = document.createElement("div");
+        answer.className = "answer";
+        answer.textContent = turn.text;
+        if (turn.lang) answer.lang = turn.lang;
+        const tools = document.createElement("div");
+        tools.className = "answer-tools";
+        const speak = chatButton("speak", "Read answer aloud", "");
+        const copy = chatButton("copy", "Copy answer", svgIcon("copy", 13));
+        const copied = document.createElement("div");
+        copied.className = "copied";
+        copied.setAttribute("role", "status");
+        copied.hidden = true;
+        tools.append(speak, copy, copied);
+        msg.append(answer, tools);
+        speak.addEventListener("click", () => {
+            if (readingAnswer === answer) speech.stop();
+            else readAnswer(answer);
+        });
+        copy.addEventListener("click", () => copyAnswer(answer, tools));
+        return msg;
+    }
+
+    function addTurn(turn) {
+        turns.push(turn);
+        if (turns.length > MAX_TURNS_KEPT) turns = turns.slice(-MAX_TURNS_KEPT);
+        renderTurns();
+        saveChat();
     }
 
     function showAskStatus(kind, message) {
-        const { status, answerRow } = askPanel;
+        const { status } = chat;
         status.hidden = false;
         status.className = `status ${kind}`;
         status.textContent = message;
-        answerRow.hidden = true;
-        placeAskPanel();
+        chat.empty.hidden = true;
+        keepOnScreen(chat.panel);
     }
 
-    // `lang`: the answer's language when known (translations), so read-aloud picks the right voice.
-    function showAnswer(text, lang) {
-        const { status, answerRow, answer } = askPanel;
-        status.hidden = true;
-        answer.textContent = text;
-        if (lang) answer.lang = lang;
-        else answer.removeAttribute("lang");
-        answer.scrollTop = 0;
-        showCopied(null);
-        language.prepare(text);
-        answerRow.hidden = false;
-        placeAskPanel();
-    }
+    let askBusy = false;
 
     function setAskBusy(busy) {
-        askPanel.send.disabled = busy;
-        for (const chip of askPanel.chips) chip.disabled = busy;
+        askBusy = busy;
+        if (!chat) return;
+        chat.send.disabled = busy;
+        for (const chip of chat.chips) chip.disabled = busy;
     }
 
     function sendQuestion() {
-        const question = askPanel.input.value.trim();
-        if (!question) return;
+        const question = chat.input.value.trim();
+        if (!question || askBusy) return;
+        chat.input.value = "";
         const target = parseTranslateTarget(question);
         if (target) rememberTranslateTarget(target);
-        askGemini({ action: "ask", question }, target ? target.code : "");
+        // Images, charts and linked pages go with the question; everything else goes to the tutor chat,
+        // with any attached text.
+        const action = ["image", "chart", "link"].includes(askKind) ? "ask" : "chat";
+        askGemini({ action, question }, target ? target.code : "", question);
     }
 
-    function sendChip(action) {
+    function sendChip(action, label) {
         if (action === "readit") {
             // Read the maths aloud with Listen's own spoken form (no Gemini needed).
             if (askImage && askKind === "math") onListenMath(askImage);
-            else if (askRange) read(askRange, askContext, false);
+            else if (askRange) read(askRange, askContext, null);
             return;
         }
         if (action !== "translate" || askImage) {
-            askGemini({ action }, "");
+            askGemini({ action }, "", label);
             return;
         }
         const target = translationTarget();
-        askGemini({ action, target: target.name }, target.code);
+        askGemini({ action, target: target.name }, target.code, `${label} to ${target.name}`);
     }
 
     // Sends a request to background.js; always resolves to { ok, answer } or { ok: false, error }.
@@ -2007,68 +2464,85 @@
         }
     }
 
-    // Sends `request` ({ action, question?, target? }) about askContext or askImage and shows the reply.
-    async function askGemini(request, answerLang) {
-        if (askPanel.send.disabled) return;
-        if (readingAnswer) speech.stop();
+    // What's attached, in the form background.js expects.
+    async function aboutAttachment() {
+        if (askKind === "link") return { link: { url: linkUrl(askImage).href } };
+        if (askKind === "code") return { code: { text: askContext, language: askLanguage } };
+        if (askKind === "math") {
+            const text = askImage ? texOf(askImage) || mathSpeech(askImage) : askRange ? mathContext(askRange) : askContext;
+            return { math: { text } };
+        }
+        if (askKind === "chart") return { chart: await chartInfo(askImage) };
+        if (askKind === "image") return { image: imageInfo(askImage) };
+        return askKind ? { text: askContext } : {};
+    }
 
-        const id = ++askRequest;
+    // Sends `request` ({ action, question?, target? }) with the attachment and the last few turns, shows
+    // `userText` as the student's message and the answer below it.
+    async function askGemini(request, answerLang, userText) {
+        if (askBusy) return;
+        if (readingAnswer) speech.stop();
+        const id = askRequest;
+        const history = historyForRequest();
+        addTurn({ role: "user", text: userText });
         setAskBusy(true);
         showAskStatus("loading", "Thinking…");
         let about;
         try {
-            if (askKind === "link") about = { link: { url: linkUrl(askImage).href } };
-            else if (askKind === "code") about = { code: { text: askContext, language: codeLanguage(askCode) } };
-            else if (askKind === "math") {
-                const text = askImage ? texOf(askImage) || mathSpeech(askImage) : askRange ? mathContext(askRange) : askContext;
-                about = { math: { text } };
-            }
-            else if (!askImage) about = { text: askContext };
-            else if (askKind === "chart") about = { chart: await chartInfo(askImage) };
-            else about = { image: imageInfo(askImage) };
+            about = await aboutAttachment();
         } catch (error) {
             setAskBusy(false);
             if (id === askRequest) showAskStatus("error", error instanceof CaptureError ? error.message : "This chart couldn't be captured.");
             return;
         }
-        const response = await askBackground({ ...request, ...about });
+        const response = await askBackground({ ...request, ...about, history });
+        if (id !== askRequest) return; // "New chat" was pressed meanwhile
         setAskBusy(false);
-        if (id !== askRequest) return; // closed or replaced by a newer question
-        if (response.ok) showAnswer(response.answer, answerLang);
-        else showAskStatus("error", withAltText(response));
+        if (response.ok) {
+            chat.status.hidden = true;
+            addTurn({ role: "model", text: response.answer, lang: answerLang || undefined });
+            language.prepare(response.answer);
+        } else {
+            showAskStatus("error", withAltText(response));
+        }
     }
 
-    function setAnswerSpeakIcon(playing) {
-        const { speak } = askPanel;
-        speak.replaceChildren(playing ? "■" : svgIcon("speaker", 13));
-        speak.classList.toggle("stop", playing);
-        speak.title = playing ? "Stop" : "Read answer aloud";
-        speak.setAttribute("aria-label", speak.title);
+    // ----- Read aloud and Copy -----
+
+    function updateSpeakButtons() {
+        if (!chat) return;
+        for (const msg of chat.messages.querySelectorAll(".msg.model")) {
+            const playing = readingAnswer === msg.querySelector(".answer");
+            const speak = msg.querySelector("button.speak");
+            speak.replaceChildren(playing ? "■" : svgIcon("speaker", 13));
+            speak.classList.toggle("stop", playing);
+            speak.title = playing ? "Stop" : "Read answer aloud";
+            speak.setAttribute("aria-label", speak.title);
+        }
     }
 
-    function readAnswer() {
-        const textNode = askPanel.answer.firstChild;
+    function readAnswer(answer) {
+        const textNode = answer.firstChild;
         if (!textNode) return;
         const range = document.createRange();
         range.selectNodeContents(textNode);
-        read(range, textNode.data, true);
+        read(range, textNode.data, answer);
     }
-
-    // ----- Copy -----
 
     const COPIED_MS = 1500;
     let copiedTimer = null;
+    let copiedTools = null;
 
     // `ok`: true shows "Copied", false "Couldn't copy", null resets the button.
-    function showCopied(ok) {
-        const { copy, copied } = askPanel;
+    function showCopied(tools, ok) {
+        if (copiedTools && copiedTools !== tools) showCopied(copiedTools, null);
         clearTimeout(copiedTimer);
-        copy.replaceChildren(svgIcon(ok ? "check" : "copy", 13));
-        copy.title = "Copy answer";
-        copy.setAttribute("aria-label", copy.title);
+        copiedTools = ok === null ? null : tools;
+        tools.querySelector("button.copy").replaceChildren(svgIcon(ok ? "check" : "copy", 13));
+        const copied = tools.querySelector(".copied");
         copied.hidden = ok === null;
         copied.textContent = ok ? "Copied" : "Couldn't copy";
-        if (ok !== null) copiedTimer = setTimeout(() => showCopied(null), COPIED_MS);
+        if (ok !== null) copiedTimer = setTimeout(() => showCopied(tools, null), COPIED_MS);
     }
 
     // The older copy command is the fallback where the clipboard API isn't allowed.
@@ -2076,7 +2550,7 @@
         const field = document.createElement("textarea");
         field.value = text;
         field.style.cssText = "position: fixed; opacity: 0;";
-        barShadow.append(field);
+        chatShadow.append(field);
         field.select();
         let ok = false;
         try {
@@ -2088,8 +2562,8 @@
         return ok;
     }
 
-    async function copyAnswer() {
-        const text = askPanel.answer.textContent;
+    async function copyAnswer(answer, tools) {
+        const text = answer.textContent;
         if (!text) return;
         let ok;
         try {
@@ -2098,7 +2572,7 @@
         } catch (e) {
             ok = copyWithCommand(text);
         }
-        showCopied(ok);
+        showCopied(tools, ok);
     }
 
     // ---------- Images ----------
@@ -2181,7 +2655,7 @@
     }
 
     function hideImageBar() {
-        if (!imageTarget || imageBusy || speech.isSpeaking() || isAskOpen()) return;
+        if (!imageTarget || imageBusy || speech.isSpeaking()) return;
         hideBar();
     }
 
@@ -2256,10 +2730,10 @@
                 return;
             }
             if (!found) return;
-            if (selectedText || speech.isSpeaking() || isAskOpen() || imageBusy) return;
+            if (selectedText || speech.isSpeaking() || imageBusy) return;
             clearTimeout(hoverTimer);
             hoverTimer = setTimeout(() => {
-                if (found.el.matches(":hover") && !selectedText && !speech.isSpeaking() && !isAskOpen()) {
+                if (found.el.matches(":hover") && !selectedText && !speech.isSpeaking()) {
                     showImageBar(found.el, found.kind);
                 }
             }, found.kind === "link" ? LINK_HOVER_DELAY_MS : IMAGE_HOVER_DELAY_MS);
@@ -2641,7 +3115,6 @@
     }
 
     function updateBar() {
-        if (isAskOpen()) return; // typing a question moves the selection; keep the bar where it is
         const result = readSelection();
         if (!result) {
             hideBar();
@@ -2661,26 +3134,25 @@
     // ---------- Events ----------
 
     document.addEventListener("mouseup", (event) => {
-        if (isBarEvent(event)) return;
+        if (isBarEvent(event) || isChatEvent(event)) return;
         lastPointer = { x: event.clientX, y: event.clientY };
         // Wait a tick so the browser finishes updating the selection.
         setTimeout(() => {
             updateBar();
             // A click (no selection) on a rendered equation shows its bar, like hovering it.
-            if (selectedText || speech.isSpeaking() || isAskOpen()) return;
+            if (selectedText || speech.isSpeaking()) return;
             const found = visualTargetFor(event.target);
             if (found && found.kind === "math") showImageBar(found.el, "math");
         }, 0);
     });
 
-    // Hides the bar and closes the ask panel.
+    // Hides the bar. The chat stays open until it's closed.
     function dismiss() {
-        closeAsk();
         hideBar();
     }
 
     document.addEventListener("mousedown", (event) => {
-        if (!isBarEvent(event)) dismiss();
+        if (!isBarEvent(event) && !isChatEvent(event)) dismiss();
     });
 
     // Keyboard selection (Shift + arrows, Cmd+A).
@@ -2701,14 +3173,20 @@
 
     // Hide as soon as the selection is cleared.
     document.addEventListener("selectionchange", () => {
-        if (isAskOpen()) return; // focusing the question field clears the page selection
         if (readOnlyCodeSelection()) return; // a code viewer's own text field holds the selection
         const selection = window.getSelection();
         if (!selection || selection.isCollapsed) hideBar();
     });
 
-    window.addEventListener("resize", dismiss);
+    window.addEventListener("resize", () => {
+        dismiss();
+        if (!chat) return;
+        if (!chat.bubble.hidden) placeBubble();
+        keepOnScreen(chat.panel);
+    });
 
     // Don't keep talking after the user leaves the page.
     window.addEventListener("pagehide", () => speech.stop());
+
+    createChat(); // the chat bubble
 })();

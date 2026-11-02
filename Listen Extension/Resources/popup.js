@@ -1,8 +1,10 @@
-// Listen — toolbar popup: voice, default speed, hover buttons and AI features.
+// Listen — toolbar popup: voice, default speed, hover buttons, the chat bubble and AI features.
 // Everything is saved in browser.storage.local; content.js picks changes up straight away.
 
 const SPEEDS = [0.75, 1, 1.25, 1.5, 2]; // the speed button's options, in order
-const DEFAULTS = { voice: "", speed: 1, showImageButtons: false, showLinkButtons: false, aiFeatures: true };
+const DEFAULTS = {
+    voice: "", speed: 1, showImageButtons: false, showLinkButtons: false, showChatBubble: true, aiFeatures: true,
+};
 const DAILY_QUESTIONS = 30; // the proxy's limit, shown until the first answer reports the real one
 const TEST_SENTENCE = "This is how Listen sounds when it reads to you.";
 
@@ -152,7 +154,7 @@ async function start() {
 
     showSpeeds();
 
-    for (const key of ["showImageButtons", "showLinkButtons", "aiFeatures"]) {
+    for (const key of ["showImageButtons", "showLinkButtons", "showChatBubble", "aiFeatures"]) {
         const box = $(key);
         box.checked = settings[key];
         box.addEventListener("change", () => {

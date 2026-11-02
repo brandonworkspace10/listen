@@ -151,11 +151,22 @@ async function chartImagePart(chart) {
 // About code (code: { text, language }): "ask", "explain", "linebyline" or "bugs".
 // About maths (math: { text }, with TeX or MathML for each equation): "ask", "explain", "solve" or "speak".
 // About a linked page (link: { url }): "ask", "summarize", "keypoints" or "worth".
-async function ask({ action, question, text, target, image, chart, code, math, link }) {
-    const kind = link ? "link" : math ? "math" : code ? "code" : chart ? "chart" : image ? "image" : "text";
-    if (action === "ask" && !question) throw new AskError("Type a question or request first.");
+// Maths also takes "hint" and "check". "chat" is a typed message to the tutor, with any attached text, code
+// or maths. `history` is the conversation so far: [{ role: "user" | "model", text }], already capped.
+async function ask({ action, question, text, target, image, chart, code, math, link, history }) {
+    const kind =
+        action === "chat" ? "chat" : link ? "link" : math ? "math" : code ? "code" : chart ? "chart" : image ? "image" : "text";
+    if ((action === "ask" || action === "chat") && !question) throw new AskError("Type a question or request first.");
     let input;
-    if (link) {
+    if (kind === "chat") {
+        let attached = "";
+        if (math) attached = `Attached maths:\n"""\n${String(math.text || "").slice(0, MAX_CONTEXT_CHARS)}\n"""`;
+        else if (code) {
+            const language = String(code.language || "").replace(/[^\w+#. -]/g, "").slice(0, 30);
+            attached = `Attached code${language ? ` (${language})` : ""}:\n"""\n${String(code.text || "").slice(0, MAX_CONTEXT_CHARS)}\n"""`;
+        } else if (text) attached = `Attached text from a web page:\n"""\n${text.slice(0, MAX_CONTEXT_CHARS)}\n"""`;
+        input = `${attached ? `${attached}\n\n` : ""}The student's message: ${question}`;
+    } else if (link) {
         const page = await loadPage(link.url);
         const quoted =
             `Page title: ${page.title}\nWebsite: ${page.host}\n<<<PAGE TEXT START>>>\n${page.text}\n<<<PAGE TEXT END>>>`;
@@ -195,7 +206,7 @@ async function ask({ action, question, text, target, image, chart, code, math, l
         response = await fetch(PROXY_URL, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ installId: id, kind, action, input, target }),
+            body: JSON.stringify({ installId: id, kind, action, input, target, history }),
             signal: controller.signal,
         });
     } catch (e) {
@@ -217,7 +228,7 @@ async function ask({ action, question, text, target, image, chart, code, math, l
     saveUsage(body.remaining, body.limit);
     // Spoken answers drop markdown backticks; link answers never carry web addresses.
     if (link) return answer.replace(/(https?:\/\/|www\.)\S+/gi, "").replace(/\s{2,}/g, " ").trim();
-    return code || math ? answer.replace(/`+/g, "") : answer;
+    return code || math || kind === "chat" ? answer.replace(/`+/g, "") : answer;
 }
 
 // ----- Linked pages -----
@@ -344,7 +355,52 @@ async function loadPage(address) {
     }
 }
 
-browser.runtime.onMessage.addListener((request) => {
+// ----- Conversations -----
+// Each tab's chat ({ turns, attachment }) is kept in memory until "New chat" or the tab closes: in
+// storage.session where Safari has it (it outlives the background page being unloaded), otherwise in a Map.
+
+const MAX_CHAT_CHARS = 200000;
+const chats = new Map();
+const sessionStore = browser.storage && browser.storage.session;
+
+async function loadChat(tabId) {
+    if (!sessionStore) return chats.get(tabId) || null;
+    const key = `chat:${tabId}`;
+    return (await sessionStore.get(key))[key] || null;
+}
+
+async function saveChat(tabId, chat) {
+    const keep = chat && JSON.stringify(chat).length <= MAX_CHAT_CHARS ? chat : null;
+    if (!sessionStore) {
+        if (keep) chats.set(tabId, keep);
+        else chats.delete(tabId);
+        return;
+    }
+    const key = `chat:${tabId}`;
+    if (keep) await sessionStore.set({ [key]: keep });
+    else await sessionStore.remove(key);
+}
+
+if (browser.tabs && browser.tabs.onRemoved) {
+    browser.tabs.onRemoved.addListener((tabId) => saveChat(tabId, null).catch(() => {}));
+}
+
+// The last few turns, as plain { role, text } pairs.
+function cleanHistory(history) {
+    if (!Array.isArray(history)) return [];
+    return history
+        .filter((t) => t && (t.role === "user" || t.role === "model") && typeof t.text === "string" && t.text.trim())
+        .slice(-6)
+        .map((t) => ({ role: t.role, text: t.text.slice(0, 2000) }));
+}
+
+browser.runtime.onMessage.addListener((request, sender) => {
+    if (request && (request.type === "listen:chat-load" || request.type === "listen:chat-save")) {
+        const tabId = sender && sender.tab && sender.tab.id;
+        if (typeof tabId !== "number") return Promise.resolve(null);
+        if (request.type === "listen:chat-load") return loadChat(tabId).catch(() => null);
+        return saveChat(tabId, request.chat || null).then(() => true, () => false);
+    }
     if (!request || request.type !== "listen:ask") return;
     // Only plain language names (e.g. "Spanish") are passed into the prompt.
     const target = String(request.target || "English").replace(/[^\p{L} -]/gu, "").slice(0, 40) || "English";
@@ -366,6 +422,7 @@ browser.runtime.onMessage.addListener((request) => {
         code,
         math,
         link,
+        history: cleanHistory(request.history),
     }).then(
         (answer) => {
             if (cacheKey) remember(answerCache, cacheKey, answer);
