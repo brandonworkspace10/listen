@@ -1643,12 +1643,13 @@
     ];
     const MATH_PROBLEM_CHIPS = [
         ["hint", "Hint", "One nudge toward the next step, without the answer"],
-        ["solve", "Solve step by step", "Work through it step by step"],
+        ["solve", "Solve", "The answer, then the working step by step"],
         ["explain", "Explain", "Explain the problem simply"],
     ];
     const MATH_ANSWER_CHIPS = [
         ["check", "Check my answer", "Check whether the answer shown is right"],
         ["hint", "Hint", "One nudge toward the next step, without the answer"],
+        ["solve", "Solve", "The answer, then the working step by step"],
         ["explain", "Explain", "Explain the problem simply"],
     ];
     const IMAGE_CHIPS = [
@@ -1683,9 +1684,28 @@
     }
 
     // ----- Maths problems -----
-    // A maths problem (an equation to solve, or a word problem with a question) gets Hint / Solve step by
-    // step / Explain; with an answer already written down, Check my answer / Hint / Explain. Other maths
-    // (a formula in an article) keeps Explain / Solve step by step / Read it.
+    // A maths problem (a sum, an expression, an equation to solve, or a word problem with a question) gets
+    // Hint / Solve / Explain; with an answer already written down, Check my answer / Hint / Solve / Explain.
+    // Other maths (a formula in an article) keeps Explain / Solve step by step / Read it.
+
+    // Numbers, letters or brackets joined by an operator: "5 + 7", "3/4 × 2", "2x − 1", "(a + b)^2".
+    const EXPRESSION = /(\d|\b[a-z]\b|\))\s*[+\-−×÷*/^=]\s*(\d|\(|\b[a-z]\b)/i;
+    const PERCENT_OF = /\d\s*%\s*of\s*\d/i;
+    // Dates and year ranges look like sums but aren't: "12/03/2024", "2023-24", "1914–1918".
+    const DATE_OR_RANGE = /\b\d{1,4}[-/.]\d{1,2}[-/.]\d{2,4}\b|\b(1[0-9]|20)\d{2}\s*[-–]\s*((1[0-9]|20)?\d{2})\b/g;
+    // Words that can sit around a sum without making it prose.
+    const MATHS_GLUE = /^(of|what|is|solve|find|simplify|calculate|work|out|evaluate|for|and|the|my|answer|ans|equals|then)$/i;
+
+    // A short piece of text that is mostly a sum, expression or equation.
+    function isExpression(text) {
+        if (text.length > 300) return false;
+        let cleaned = text.replace(DATE_OR_RANGE, " ");
+        const words = (cleaned.match(/\p{L}{2,}/gu) || []).filter((w) => !MATHS_GLUE.test(w));
+        if (words.length > 3) return false;
+        // Among words, "4-7" or "555-1234" is a range or a number, not a subtraction.
+        if (words.length) cleaned = cleaned.replace(/(\d)-(\d)/g, "$1 $2");
+        return EXPRESSION.test(cleaned) || PERCENT_OF.test(cleaned);
+    }
 
     // A letter next to a number or an operator, then "=": "2x + 3 = 11", "x² − 4 = 0".
     const EQUATION = /(\d\s*[a-z]\b|\b[a-z]\s*[\^²³]|\b[a-z]\s*[+\-−*×÷/]\s*\d|\d\s*[+\-−*×÷/]\s*[a-z]\b)[^=\n]{0,60}=/i;
@@ -1705,6 +1725,7 @@
         const question = QUESTION_CUE.test(text);
         const sum = SUM_WITH_RESULT.test(text);
         const isProblem =
+            isExpression(text) ||
             EQUATION.test(text) ||
             sum ||
             (numbers >= 2 && question && MATHS_WORDS.test(text)) ||
@@ -1813,7 +1834,7 @@
 
     const KIND_LABELS = {
         text: "Text", email: "Message", code: "Code", image: "Image", chart: "Chart", link: "Link",
-        problem: "Maths problem", answered: "Maths and your answer", formula: "Maths",
+        problem: "Maths", answered: "Maths and your answer", formula: "Maths",
     };
 
     function snippet(text, max) {
@@ -1864,6 +1885,40 @@
     // ----- Building the chat (its own Shadow DOM host, separate from the bar) -----
 
     const CHAT_CSS = `
+        /* Colours for light and dark mode. */
+        :host {
+            --chat-bg: #ffffff;
+            --chat-text: #1c1c1e;
+            --chat-muted: #6e6e73;
+            --chat-soft: #f2f2f7;
+            --chat-soft-hover: #e5e5ea;
+            --chat-card: #f7f7f9;
+            --chat-border: #e5e5ea;
+            --chat-field: #ffffff;
+            --chat-field-border: #d1d1d6;
+            --chat-strong: #1c1c1e;
+            --chat-on-strong: #ffffff;
+            --chat-accent: #0a84ff;
+            --chat-accent-text: #0a64c8;
+            --chat-error: #c62828;
+        }
+        @media (prefers-color-scheme: dark) {
+            :host {
+                --chat-bg: #1c1c1e;
+                --chat-text: #f2f2f7;
+                --chat-muted: #98989d;
+                --chat-soft: #2c2c2e;
+                --chat-soft-hover: #3a3a3c;
+                --chat-card: #2a2a2c;
+                --chat-border: #38383a;
+                --chat-field: #2c2c2e;
+                --chat-field-border: #48484a;
+                --chat-strong: #f2f2f7;
+                --chat-on-strong: #1c1c1e;
+                --chat-accent-text: #64b0ff;
+                --chat-error: #ff6b6b;
+            }
+        }
         button.bubble {
             position: fixed;
             width: ${BUBBLE_SIZE}px;
@@ -1880,8 +1935,8 @@
             width: ${CHAT_PANEL_WIDTH}px;
             max-height: calc(100vh - ${EDGE * 2}px);
             border-radius: 14px;
-            background: #ffffff;
-            color: #1c1c1e;
+            background: var(--chat-bg);
+            color: var(--chat-text);
             box-shadow: 0 8px 30px rgba(0, 0, 0, 0.28);
             font: 400 14px/1.45 -apple-system, "Helvetica Neue", sans-serif;
             text-align: left;
@@ -1895,7 +1950,7 @@
             align-items: center;
             gap: 6px;
             padding: 8px 8px 8px 12px;
-            background: #f2f2f7;
+            border-bottom: 1px solid var(--chat-border);
             cursor: grab;
             touch-action: none;
             user-select: none;
@@ -1903,18 +1958,19 @@
         }
         .panel.dragging .chat-head { cursor: grabbing; }
         .chat-title { flex: 1; font-weight: 600; font-size: 13px; }
+        .panel button { box-shadow: none; }
+        .panel button:hover { transform: none; }
         button.head-button {
             width: auto;
             height: 24px;
             padding: 0 10px;
             border-radius: 12px;
-            background: #ffffff;
-            color: #1c1c1e;
+            background: var(--chat-soft);
+            color: var(--chat-text);
             font: 500 12px/1 -apple-system, "Helvetica Neue", sans-serif;
-            box-shadow: none;
         }
         button.head-button.close { width: 24px; padding: 0; font-size: 16px; }
-        button.head-button:hover { background: #e5e5ea; transform: none; }
+        button.head-button:hover { background: var(--chat-soft-hover); }
         .chat-body { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; padding: 10px; gap: 8px; }
         .attachment {
             flex: none;
@@ -1922,9 +1978,9 @@
             align-items: flex-start;
             gap: 6px;
             padding: 6px 8px;
-            border-left: 3px solid #0a84ff;
+            border-left: 3px solid var(--chat-accent);
             border-radius: 8px;
-            background: rgba(10, 132, 255, 0.08);
+            background: rgba(10, 132, 255, 0.1);
             font-size: 13px;
             line-height: 1.35;
         }
@@ -1936,56 +1992,90 @@
             -webkit-box-orient: vertical;
             -webkit-line-clamp: 3;
         }
-        .attachment-kind { display: block; color: #0a64c8; font-size: 11px; font-weight: 600; }
+        .attachment-kind { display: block; color: var(--chat-accent-text); font-size: 11px; font-weight: 600; }
         button.detach {
             width: 18px;
             height: 18px;
             background: transparent;
-            color: #6e6e73;
+            color: var(--chat-muted);
             font-size: 14px;
-            box-shadow: none;
         }
-        button.detach:hover { color: #1c1c1e; transform: none; }
+        button.detach:hover { color: var(--chat-text); }
         .messages {
             flex: 1 1 auto;
             min-height: 0;
-            max-height: 340px;
+            max-height: 360px;
             overflow: auto;
             display: flex;
             flex-direction: column;
-            gap: 8px;
+            gap: 10px;
         }
         .messages:empty { display: none; }
-        .msg { white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; -webkit-user-select: text; }
+        .msg { overflow-wrap: anywhere; user-select: text; -webkit-user-select: text; }
         .msg.user {
             align-self: flex-end;
             max-width: 85%;
             padding: 6px 10px;
             border-radius: 12px 12px 4px 12px;
-            background: #1c1c1e;
-            color: #ffffff;
+            background: var(--chat-strong);
+            color: var(--chat-on-strong);
+            white-space: pre-wrap;
         }
-        .msg.model { display: flex; gap: 8px; align-items: flex-start; }
-        .answer { flex: 1; min-width: 0; }
-        .answer-tools { position: relative; flex: none; display: flex; gap: 6px; }
-        button.speak, button.copy { width: 24px; height: 24px; box-shadow: none; }
-        button.speak.stop { font-size: 11px; }
-        .copied {
-            position: absolute;
-            top: 30px;
-            right: 0;
-            padding: 4px 8px;
-            border-radius: 10px;
-            background: #1c1c1e;
-            color: #ffffff;
-            font: 500 11px/1 -apple-system, "Helvetica Neue", sans-serif;
-            white-space: nowrap;
-            pointer-events: none;
+        /* Answers: a full-width card with a small row of buttons under it. */
+        .msg.model { display: flex; flex-direction: column; gap: 4px; }
+        .answer {
+            padding: 10px 12px;
+            border: 1px solid var(--chat-border);
+            border-radius: 12px;
+            background: var(--chat-card);
+            white-space: pre-wrap;
         }
-        .empty { margin: 0; color: #6e6e73; font-size: 13px; }
-        .status { margin-top: 0; }
-        .chips { margin-bottom: 0; }
+        .answer .final {
+            display: block;
+            font-size: 22px;
+            font-weight: 700;
+            line-height: 1.25;
+            font-variant-numeric: tabular-nums;
+        }
+        .answer .steps {
+            display: block;
+            margin-top: 8px;
+            padding-top: 8px;
+            border-top: 1px solid var(--chat-border);
+            font-variant-numeric: tabular-nums;
+        }
+        .answer .step { display: block; }
+        .answer-tools { display: flex; align-items: center; gap: 2px; padding-left: 4px; }
+        .panel button.speak, .panel button.copy {
+            width: 26px;
+            height: 26px;
+            border-radius: 6px;
+            background: transparent;
+            color: var(--chat-muted);
+            font-size: 11px;
+        }
+        .panel button.speak:hover, .panel button.copy:hover { background: var(--chat-soft); color: var(--chat-text); }
+        .copied { margin-left: 4px; color: var(--chat-muted); font-size: 12px; }
+        .empty { margin: 0; color: var(--chat-muted); font-size: 13px; }
+        .status { margin-top: 0; color: var(--chat-muted); }
+        .status.error { color: var(--chat-error); }
+        .status.loading::before { border-color: var(--chat-border); border-top-color: var(--chat-muted); }
+        /* Quick actions: one row that scrolls sideways when it doesn't fit. */
+        .chips {
+            flex: none;
+            flex-wrap: nowrap;
+            margin: 0 -10px;
+            padding: 0 10px;
+            overflow-x: auto;
+            scrollbar-width: none;
+        }
+        .chips::-webkit-scrollbar { display: none; }
         .chips:empty { display: none; }
+        .panel button.chip { flex: none; background: var(--chat-soft); color: var(--chat-text); }
+        .panel button.chip:hover { background: var(--chat-soft-hover); }
+        .panel input { background: var(--chat-field); color: var(--chat-text); border-color: var(--chat-field-border); }
+        .panel input:focus { border-color: var(--chat-accent); }
+        .panel button.send { background: var(--chat-strong); color: var(--chat-on-strong); }
     `;
 
     let chatHost = null;
@@ -2283,6 +2373,9 @@
             language: code ? codeLanguage(code) : "", mathMode,
         });
         saveChat();
+        // The bar's job is done; it would otherwise sit on top of the panel.
+        window.getSelection().removeAllRanges();
+        hideBar();
         chat.input.focus();
     }
 
@@ -2375,12 +2468,12 @@
         }
         const answer = document.createElement("div");
         answer.className = "answer";
-        answer.textContent = turn.text;
+        fillAnswer(answer, turn.text);
         if (turn.lang) answer.lang = turn.lang;
         const tools = document.createElement("div");
         tools.className = "answer-tools";
         const speak = chatButton("speak", "Read answer aloud", "");
-        const copy = chatButton("copy", "Copy answer", svgIcon("copy", 13));
+        const copy = chatButton("copy", "Copy answer", svgIcon("copy", 14));
         const copied = document.createElement("div");
         copied.className = "copied";
         copied.setAttribute("role", "status");
@@ -2391,8 +2484,34 @@
             if (readingAnswer === answer) speech.stop();
             else readAnswer(answer);
         });
-        copy.addEventListener("click", () => copyAnswer(answer, tools));
+        copy.addEventListener("click", () => copyAnswer(turn.text, tools));
         return msg;
+    }
+
+    // A maths answer starts with its final answer on its own line ("= 26", "x = 2") followed by the
+    // working, one equation per line: the answer is shown large and bold, the steps underneath.
+    const FINAL_ANSWER = /^\s*(=|≈|[a-zA-Zα-ω]\s*[=≈])\s*\S/;
+
+    function fillAnswer(answer, text) {
+        const lines = text.split("\n").map((line) => line.trim()).filter(Boolean);
+        if (!lines.length || !FINAL_ANSWER.test(lines[0]) || lines[0].length > 40) {
+            answer.textContent = text;
+            return;
+        }
+        const final = document.createElement("span");
+        final.className = "final";
+        final.textContent = lines[0];
+        answer.append(final);
+        if (lines.length < 2) return;
+        const steps = document.createElement("span");
+        steps.className = "steps";
+        for (const line of lines.slice(1)) {
+            const step = document.createElement("span");
+            step.className = "step";
+            step.textContent = line;
+            steps.append(step);
+        }
+        answer.append(steps);
     }
 
     function addTurn(turn) {
@@ -2514,7 +2633,7 @@
         for (const msg of chat.messages.querySelectorAll(".msg.model")) {
             const playing = readingAnswer === msg.querySelector(".answer");
             const speak = msg.querySelector("button.speak");
-            speak.replaceChildren(playing ? "■" : svgIcon("speaker", 13));
+            speak.replaceChildren(playing ? "■" : svgIcon("speaker", 14));
             speak.classList.toggle("stop", playing);
             speak.title = playing ? "Stop" : "Read answer aloud";
             speak.setAttribute("aria-label", speak.title);
@@ -2522,11 +2641,10 @@
     }
 
     function readAnswer(answer) {
-        const textNode = answer.firstChild;
-        if (!textNode) return;
+        if (!answer.textContent) return;
         const range = document.createRange();
-        range.selectNodeContents(textNode);
-        read(range, textNode.data, answer);
+        range.selectNodeContents(answer);
+        read(range, answer.textContent, answer);
     }
 
     const COPIED_MS = 1500;
@@ -2538,7 +2656,7 @@
         if (copiedTools && copiedTools !== tools) showCopied(copiedTools, null);
         clearTimeout(copiedTimer);
         copiedTools = ok === null ? null : tools;
-        tools.querySelector("button.copy").replaceChildren(svgIcon(ok ? "check" : "copy", 13));
+        tools.querySelector("button.copy").replaceChildren(svgIcon(ok ? "check" : "copy", 14));
         const copied = tools.querySelector(".copied");
         copied.hidden = ok === null;
         copied.textContent = ok ? "Copied" : "Couldn't copy";
@@ -2562,8 +2680,7 @@
         return ok;
     }
 
-    async function copyAnswer(answer, tools) {
-        const text = answer.textContent;
+    async function copyAnswer(text, tools) {
         if (!text) return;
         let ok;
         try {
