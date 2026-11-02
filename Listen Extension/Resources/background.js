@@ -226,6 +226,8 @@ async function ask({ action, question, text, target, image, chart, code, math, l
     const answer = typeof body?.answer === "string" ? body.answer.trim() : "";
     if (!answer) throw new AskError("Gemini didn't return an answer. Try rephrasing the question.");
     saveUsage(body.remaining, body.limit);
+    // A chart or table for the chat: data only, checked by the proxy and again by content.js before drawing.
+    if (kind === "chat" && body.visual && typeof body.visual === "object") return { answer, visual: body.visual };
     // Spoken answers drop markdown backticks; link answers never carry web addresses.
     if (link) return answer.replace(/(https?:\/\/|www\.)\S+/gi, "").replace(/\s{2,}/g, " ").trim();
     return code || math || kind === "chat" ? answer.replace(/`+/g, "") : answer;
@@ -425,6 +427,7 @@ browser.runtime.onMessage.addListener((request, sender) => {
         history: cleanHistory(request.history),
     }).then(
         (answer) => {
+            if (typeof answer === "object") return { ok: true, ...answer };
             if (cacheKey) remember(answerCache, cacheKey, answer);
             return { ok: true, answer };
         },
@@ -434,4 +437,19 @@ browser.runtime.onMessage.addListener((request, sender) => {
             return { ok: false, error: message, imageUnavailable: Boolean(error.imageUnavailable) };
         }
     );
+});
+
+// ----- Toolbar button -----
+// Clicking Listen's toolbar button opens the chat on the page (attaching any highlighted text). Where Listen
+// can't run (Safari's own pages, or a website it isn't allowed on), the settings page opens in a tab instead.
+
+browser.action.onClicked.addListener(async (tab) => {
+    try {
+        if (tab && typeof tab.id === "number" && (await browser.tabs.sendMessage(tab.id, { type: "listen:open-chat" }))) {
+            return;
+        }
+    } catch (e) {
+        // no content script on this page
+    }
+    browser.tabs.create({ url: browser.runtime.getURL("popup.html?page") });
 });

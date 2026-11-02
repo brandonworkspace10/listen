@@ -32,6 +32,18 @@
     box-sizing: border-box;
 }
 
+/* Opened in a tab: a centred card. */
+body.page {
+    margin: 48px auto;
+    border: 1px solid var(--line);
+    border-radius: 14px;
+}
+
+.page-note {
+    margin: 0 0 8px;
+    color: var(--text);
+}
+
 body {
     width: 300px;
     margin: 0;

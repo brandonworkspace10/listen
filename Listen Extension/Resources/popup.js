@@ -1,4 +1,6 @@
-// Listen — toolbar popup: voice, default speed, hover buttons, the chat bubble and AI features.
+// Listen — settings page: voice, default speed, hover buttons, the chat bubble and AI features. It opens in a
+// tab when the toolbar button is clicked on a page where Listen can't run (on web pages the button opens the
+// chat, whose gear shows the same settings).
 // Everything is saved in browser.storage.local; content.js picks changes up straight away.
 
 const SPEEDS = [0.75, 1, 1.25, 1.5, 2]; // the speed button's options, in order
@@ -168,5 +170,10 @@ async function start() {
 
 // Stop a voice test when the popup closes.
 window.addEventListener("pagehide", () => speechSynthesis.cancel());
+
+if (location.search.includes("page")) {
+    document.body.classList.add("page");
+    $("page-note").hidden = false;
+}
 
 start();

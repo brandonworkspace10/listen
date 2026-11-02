@@ -163,7 +163,24 @@
             preferredVoice = voiceURI || "";
         }
 
-        return { speak, stop, isSpeaking, setRate, setVoice };
+        // Installed voices for the Mac's language, best first, as { uri, label } such as "Ava (Premium, US)".
+        function voiceChoices() {
+            const mine = navigator.language || "en";
+            return window.speechSynthesis
+                .getVoices()
+                .filter((v) => v.lang && normalizeLang(v.lang).split("-")[0] === normalizeLang(mine).split("-")[0])
+                .filter((v) => !NOVELTY_VOICES.has(baseName(v)))
+                .sort((a, b) => rank(b, mine) - rank(a, mine) || a.name.localeCompare(b.name))
+                .map((v) => {
+                    const id = `${v.name} ${v.voiceURI}`.toLowerCase();
+                    const quality = id.includes("premium") ? "Premium" : id.includes("enhanced") ? "Enhanced" : "";
+                    const region = normalizeLang(v.lang).split("-")[1];
+                    const details = [quality, region && region.toUpperCase()].filter(Boolean).join(", ");
+                    return { uri: v.voiceURI, label: details ? `${baseName(v)} (${details})` : baseName(v) };
+                });
+        }
+
+        return { speak, stop, isSpeaking, setRate, setVoice, voiceChoices };
     })();
 
     // ---------- Language ----------
@@ -1285,6 +1302,10 @@
             ["path", { d: "M5 15V6a2 2 0 0 1 2-2h8" }],
         ],
         check: [["path", { d: "M5 12.5l4.5 4.5L19 7.5" }]],
+        gear: [
+            ["circle", { cx: "12", cy: "12", r: "3" }],
+            ["path", { d: "M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" }],
+        ],
     };
 
     // Built with DOM calls rather than innerHTML, which pages using Trusted Types (Gmail) refuse.
@@ -1597,6 +1618,7 @@
         if (askButton) askButton.hidden = !settings.aiFeatures;
         if (!settings.aiFeatures && isAskOpen()) closeAsk();
         updateBubble();
+        refreshSettingsView();
     }
 
     try {
@@ -1622,7 +1644,7 @@
     // screen; their last positions are kept in browser.storage.local.
 
     const ASK_TIMEOUT_MS = 45000;
-    const CHAT_PANEL_WIDTH = 340;
+    const CHAT_PANEL_WIDTH = 360;
     const BUBBLE_SIZE = 44;
     const EDGE = 8; // px kept between the chat and the window's edges
     const DRAG_THRESHOLD = 4; // px a press must move to count as a drag rather than a click
@@ -1860,15 +1882,17 @@
 
     function loadChat() {
         chatLoaded ||= (async () => {
-            let chat = null;
+            let kept = null;
             try {
-                chat = await browser.runtime.sendMessage({ type: "listen:chat-load" });
+                kept = await browser.runtime.sendMessage({ type: "listen:chat-load" });
             } catch (e) {
                 // nothing kept for this tab
             }
-            if (!chat || !Array.isArray(chat.turns)) return;
-            turns = chat.turns.filter((t) => (t.role === "user" || t.role === "model") && typeof t.text === "string");
-            const saved = chat.attachment;
+            if (!kept || !Array.isArray(kept.turns)) return;
+            turns = kept.turns
+                .filter((t) => (t.role === "user" || t.role === "model") && typeof t.text === "string")
+                .map((t) => (t.visual ? { ...t, visual: cleanVisual(t.visual) || undefined } : t));
+            const saved = kept.attachment;
             if (saved && typeof saved.context === "string" && ["text", "email", "code", "math"].includes(saved.kind)) {
                 setAttachment({ kind: saved.kind, context: saved.context, language: saved.language || "", mathMode: saved.mathMode });
             }
@@ -1878,8 +1902,12 @@
     }
 
     // The last few turns, shortened, as context for the next request.
+    // A chart or table goes along as its data, so "make that a line chart" works.
     function historyForRequest() {
-        return turns.slice(-HISTORY_TURNS).map((t) => ({ role: t.role, text: t.text.slice(0, HISTORY_TURN_CHARS) }));
+        return turns.slice(-HISTORY_TURNS).map((t) => ({
+            role: t.role,
+            text: (t.visual ? `${t.text}\n${visualText(t.visual)}` : t.text).slice(0, HISTORY_TURN_CHARS),
+        }));
     }
 
     // ----- Building the chat (its own Shadow DOM host, separate from the bar) -----
@@ -1901,6 +1929,7 @@
             --chat-accent: #0a84ff;
             --chat-accent-text: #0a64c8;
             --chat-error: #c62828;
+            --chat-zebra: rgba(0, 0, 0, 0.03);
         }
         @media (prefers-color-scheme: dark) {
             :host {
@@ -1917,6 +1946,7 @@
                 --chat-on-strong: #1c1c1e;
                 --chat-accent-text: #64b0ff;
                 --chat-error: #ff6b6b;
+                --chat-zebra: rgba(255, 255, 255, 0.04);
             }
         }
         button.bubble {
@@ -2004,7 +2034,7 @@
         .messages {
             flex: 1 1 auto;
             min-height: 0;
-            max-height: 360px;
+            max-height: 440px;
             overflow: auto;
             display: flex;
             flex-direction: column;
@@ -2076,6 +2106,109 @@
         .panel input { background: var(--chat-field); color: var(--chat-text); border-color: var(--chat-field-border); }
         .panel input:focus { border-color: var(--chat-accent); }
         .panel button.send { background: var(--chat-strong); color: var(--chat-on-strong); }
+        /* Settings (behind the gear). */
+        button.head-button.gear { width: 24px; padding: 0; }
+        button.head-button.gear[aria-pressed="true"] { background: var(--chat-strong); color: var(--chat-on-strong); }
+        .settings {
+            flex: 1 1 auto;
+            min-height: 0;
+            overflow: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            padding: 12px;
+            font-size: 13px;
+        }
+        .settings-heading { margin-bottom: -4px; color: var(--chat-muted); font-size: 12px; font-weight: 600; }
+        .settings-row { display: flex; gap: 6px; align-items: center; }
+        .settings select {
+            flex: 1;
+            min-width: 0;
+            height: 28px;
+            padding: 0 6px;
+            border: 1px solid var(--chat-field-border);
+            border-radius: 8px;
+            background: var(--chat-field);
+            color: var(--chat-text);
+            font: 400 13px -apple-system, "Helvetica Neue", sans-serif;
+        }
+        .speeds { display: flex; gap: 2px; padding: 2px; border-radius: 9px; background: var(--chat-soft); }
+        .panel .speeds button {
+            flex: 1;
+            width: auto;
+            height: 26px;
+            border-radius: 7px;
+            background: transparent;
+            color: var(--chat-text);
+            font: 500 12px/1 -apple-system, "Helvetica Neue", sans-serif;
+        }
+        .panel .speeds button[aria-checked="true"] { background: var(--chat-bg); box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2); }
+        .toggle { display: flex; align-items: center; justify-content: space-between; gap: 10px; cursor: pointer; }
+        .toggle input {
+            all: initial;
+            -webkit-appearance: none;
+            appearance: none;
+            position: relative;
+            flex: none;
+            width: 34px;
+            height: 20px;
+            border-radius: 10px;
+            background: var(--chat-field-border);
+            cursor: pointer;
+            transition: background 0.15s;
+        }
+        .toggle input::before {
+            content: "";
+            position: absolute;
+            top: 2px;
+            left: 2px;
+            width: 16px;
+            height: 16px;
+            border-radius: 50%;
+            background: #ffffff;
+            box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+            transition: transform 0.15s;
+        }
+        .toggle input:checked { background: var(--chat-accent); }
+        .toggle input:checked::before { transform: translateX(14px); }
+        .toggle input:focus-visible { outline: 2px solid var(--chat-accent); outline-offset: 2px; }
+        .settings-note { margin: 0; color: var(--chat-muted); font-size: 12px; }
+        /* Charts and tables in answers. */
+        .visual { position: relative; margin-top: 10px; white-space: normal; }
+        .visual-title { margin-bottom: 6px; font-size: 13px; font-weight: 600; }
+        .visual svg { display: block; width: 100%; height: auto; overflow: visible; }
+        .visual .grid { stroke: var(--chat-border); stroke-width: 1; }
+        .visual .axis { stroke: var(--chat-muted); stroke-width: 1; }
+        .visual .tick { fill: var(--chat-muted); font: 400 10px -apple-system, "Helvetica Neue", sans-serif; }
+        .visual .axis-title { fill: var(--chat-muted); font: 600 10px -apple-system, "Helvetica Neue", sans-serif; }
+        .visual .hit:hover { opacity: 0.8; }
+        .visual .slice { stroke: var(--chat-card); stroke-width: 1.5; }
+        .chart-tip {
+            position: absolute;
+            z-index: 1;
+            padding: 4px 8px;
+            border-radius: 6px;
+            background: var(--chat-strong);
+            color: var(--chat-on-strong);
+            font-size: 12px;
+            white-space: nowrap;
+            pointer-events: none;
+        }
+        .legend { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 6px; font-size: 12px; }
+        .legend-item { display: inline-flex; align-items: center; gap: 5px; }
+        .swatch { flex: none; width: 10px; height: 10px; border-radius: 3px; }
+        .table-wrap { overflow-x: auto; border: 1px solid var(--chat-border); border-radius: 8px; }
+        .visual table { width: 100%; border-collapse: collapse; font-size: 12.5px; font-variant-numeric: tabular-nums; }
+        .visual th, .visual td {
+            padding: 5px 8px;
+            border-bottom: 1px solid var(--chat-border);
+            text-align: left;
+            white-space: nowrap;
+        }
+        .visual th { background: var(--chat-soft); font-weight: 600; }
+        .visual tbody tr:nth-child(even) td { background: var(--chat-zebra); }
+        .visual tbody tr:last-child td { border-bottom: 0; }
+        .visual .num { text-align: right; }
     `;
 
     let chatHost = null;
@@ -2114,9 +2247,11 @@
         const title = document.createElement("span");
         title.className = "chat-title";
         title.textContent = "Listen";
+        const gear = chatButton("head-button gear", "Settings", svgIcon("gear", 15));
+        gear.setAttribute("aria-pressed", "false");
         const newChat = chatButton("head-button", "New chat", "New chat");
         const close = chatButton("head-button close", "Close", "×");
-        head.append(title, newChat, close);
+        head.append(title, gear, newChat, close);
 
         const body = document.createElement("div");
         body.className = "chat-body";
@@ -2146,11 +2281,15 @@
         const send = chatButton("send", "Send", "↑");
         row.append(input, send);
         body.append(attachment, messages, empty, status, chips, row);
-        panel.append(head, body);
+        const settingsView = buildSettings();
+        panel.append(head, body, settingsView.view);
 
         chatShadow.append(style, bubble, panel);
         document.documentElement.appendChild(chatHost);
-        chat = { panel, head, bubble, attachment, attachmentText, messages, empty, status, chipRow: chips, chips: [], input, send };
+        chat = {
+            panel, head, bubble, body, gear, settings: settingsView, attachment, attachmentText, messages, empty, status,
+            chipRow: chips, chips: [], input, send,
+        };
 
         // Keep typing out of the page (site shortcuts) and out of our own page-level key handlers.
         for (const type of ["keydown", "keyup", "keypress"]) {
@@ -2168,6 +2307,7 @@
         send.addEventListener("click", () => sendQuestion());
         newChat.addEventListener("click", () => startNewChat());
         close.addEventListener("click", () => closeAsk());
+        gear.addEventListener("click", () => showSettings(chat.body.hidden === false));
         detach.addEventListener("click", () => {
             clearAttachment();
             saveChat();
@@ -2287,9 +2427,11 @@
         } else if (from === "bar" && host && host.style.display !== "none") {
             const bar = host.getBoundingClientRect();
             place(panel, bar.left, bar.bottom + 8);
-        } else {
+        } else if (!bubble.hidden) {
             const b = bubble.getBoundingClientRect();
             place(panel, b.right - panel.offsetWidth, b.top - panel.offsetHeight - 8);
+        } else {
+            place(panel, Infinity, Infinity); // bottom-right corner
         }
     }
 
@@ -2318,6 +2460,7 @@
         await loadChat();
         const wasOpen = isAskOpen();
         chat.panel.hidden = false;
+        if (chat.body.hidden) showSettings(false);
         renderAttachment();
         renderTurns();
         if (!wasOpen) placePanel(from);
@@ -2344,13 +2487,13 @@
         chat.input.focus();
     }
 
-    // The bar's chat button: attaches the selection (or the hovered image, chart, link or equation) and
-    // opens the chat. With nothing to attach it opens or closes the chat.
-    async function openAsk() {
+    // The bar's chat button (or the toolbar button, `from` "toolbar"): attaches the selection (or the hovered
+    // image, chart, link or equation) and opens the chat. With nothing to attach it opens or closes the chat.
+    async function openAsk(from = "bar") {
         const context = selectedText || lastReadText;
         if (!imageTarget && !context) {
             if (isAskOpen()) closeAsk();
-            else openChat("bar");
+            else openChat(from);
             return;
         }
         const image = imageTarget;
@@ -2367,7 +2510,7 @@
                 kind = "email";
             }
         }
-        await openChat("bar");
+        await openChat(from);
         setAttachment({
             kind, context: image ? "" : context, range, image, code,
             language: code ? codeLanguage(code) : "", mathMode,
@@ -2468,12 +2611,18 @@
         }
         const answer = document.createElement("div");
         answer.className = "answer";
-        fillAnswer(answer, turn.text);
-        if (turn.lang) answer.lang = turn.lang;
+        const answerText = document.createElement("div");
+        answerText.className = "answer-text";
+        fillAnswer(answerText, turn.text);
+        if (turn.lang) answerText.lang = turn.lang;
+        answer.append(answerText);
+        if (turn.visual) answer.append(visualElement(turn.visual));
         const tools = document.createElement("div");
         tools.className = "answer-tools";
         const speak = chatButton("speak", "Read answer aloud", "");
-        const copy = chatButton("copy", "Copy answer", svgIcon("copy", 14));
+        const copyLabel = !turn.visual ? "Copy answer"
+            : turn.visual.kind === "table" ? "Copy table (pastes into Sheets or Excel)" : "Copy the chart's data";
+        const copy = chatButton("copy", copyLabel, svgIcon("copy", 14));
         const copied = document.createElement("div");
         copied.className = "copied";
         copied.setAttribute("role", "status");
@@ -2481,10 +2630,10 @@
         tools.append(speak, copy, copied);
         msg.append(answer, tools);
         speak.addEventListener("click", () => {
-            if (readingAnswer === answer) speech.stop();
-            else readAnswer(answer);
+            if (readingAnswer === answerText) speech.stop();
+            else readAnswer(answerText);
         });
-        copy.addEventListener("click", () => copyAnswer(turn.text, tools));
+        copy.addEventListener("click", () => copyAnswer(turn.visual ? visualText(turn.visual) : turn.text, tools));
         return msg;
     }
 
@@ -2619,11 +2768,477 @@
         setAskBusy(false);
         if (response.ok) {
             chat.status.hidden = true;
-            addTurn({ role: "model", text: response.answer, lang: answerLang || undefined });
+            const visual = cleanVisual(response.visual);
+            addTurn({ role: "model", text: response.answer, lang: answerLang || undefined, ...(visual ? { visual } : {}) });
             language.prepare(response.answer);
         } else {
             showAskStatus("error", withAltText(response));
         }
+    }
+
+    // ----- Settings (the gear in the chat's header) -----
+    // The same settings as the settings page, saved in browser.storage.local; every open tab applies them
+    // through storage.onChanged (see Settings).
+
+    const SETTING_SWITCHES = [
+        ["showImageButtons", "Buttons on images and charts"],
+        ["showLinkButtons", "Buttons on links"],
+        ["showChatBubble", "Chat bubble on pages"],
+        ["aiFeatures", "AI features (chat)"],
+    ];
+    const SETTINGS_SPEEDS = [0.75, 1, 1.25, 1.5, 2];
+    const TEST_SENTENCE = "This is how Listen sounds when it reads to you.";
+    const DAILY_QUESTIONS = 30; // the proxy's limit, shown until the first answer reports the real one
+
+    function storeSetting(values) {
+        try {
+            browser.storage.local.set(values).catch((e) => console.warn("[Listen] Couldn't save settings:", e));
+        } catch (e) {
+            console.warn("[Listen] Couldn't save settings:", e);
+        }
+    }
+
+    function settingsHeading(text) {
+        const heading = document.createElement("div");
+        heading.className = "settings-heading";
+        heading.textContent = text;
+        return heading;
+    }
+
+    function buildSettings() {
+        const view = document.createElement("div");
+        view.className = "settings";
+        view.hidden = true;
+
+        const voiceRow = document.createElement("div");
+        voiceRow.className = "settings-row";
+        const select = document.createElement("select");
+        select.setAttribute("aria-label", "Voice");
+        const test = chatButton("head-button", "Test the voice", "Test");
+        voiceRow.append(select, test);
+
+        const speeds = document.createElement("div");
+        speeds.className = "speeds";
+        speeds.setAttribute("role", "radiogroup");
+        speeds.setAttribute("aria-label", "Default speed");
+
+        const switches = {};
+        const toggles = SETTING_SWITCHES.map(([key, label]) => {
+            const row = document.createElement("label");
+            row.className = "toggle";
+            const text = document.createElement("span");
+            text.textContent = label;
+            const box = document.createElement("input");
+            box.type = "checkbox";
+            box.setAttribute("role", "switch");
+            box.addEventListener("change", () => storeSetting({ [key]: box.checked }));
+            switches[key] = box;
+            row.append(text, box);
+            return row;
+        });
+
+        const usage = document.createElement("p");
+        usage.className = "settings-note";
+        const privacy = document.createElement("p");
+        privacy.className = "settings-note";
+        privacy.textContent = "Questions are sent to Google Gemini to answer. Reading stays on your Mac.";
+
+        view.append(settingsHeading("Voice"), voiceRow, settingsHeading("Default speed"), speeds, ...toggles, usage, privacy);
+
+        select.addEventListener("change", () => {
+            speech.setVoice(select.value);
+            storeSetting({ voice: select.value });
+        });
+        test.addEventListener("click", () => {
+            if (test.textContent === "Stop") {
+                speech.stop();
+                return;
+            }
+            const done = () => (test.textContent = "Test");
+            test.textContent = "Stop";
+            speech.speak(TEST_SENTENCE, { onWord() {}, onWordTimingUnavailable() {}, onEnd: done }, navigator.language || "en");
+        });
+        return { view, select, test, speeds, switches, usage };
+    }
+
+    function fillVoices() {
+        const { select } = chat.settings;
+        const voices = speech.voiceChoices();
+        select.replaceChildren(new Option("Automatic (best available)", ""));
+        for (const voice of voices) select.add(new Option(voice.label, voice.uri));
+        // A saved voice that's no longer installed shows as Automatic.
+        select.value = voices.some((v) => v.uri === settings.voice) ? settings.voice : "";
+        return voices.length > 0;
+    }
+
+    function showSpeeds() {
+        const { speeds } = chat.settings;
+        speeds.replaceChildren(
+            ...SETTINGS_SPEEDS.map((value) => {
+                const b = document.createElement("button");
+                b.type = "button";
+                b.setAttribute("role", "radio");
+                b.setAttribute("aria-checked", String(value === speed));
+                b.textContent = `${value}x`;
+                b.addEventListener("click", () => {
+                    setSpeed(value, true);
+                    showSpeeds();
+                });
+                return b;
+            })
+        );
+    }
+
+    function showUsage(usage) {
+        const el = chat.settings.usage;
+        const today = new Date().toISOString().slice(0, 10); // the proxy counts by UTC day
+        if (usage && usage.day === today && Number.isInteger(usage.remaining)) {
+            el.textContent = `${usage.remaining} of ${usage.limit} question${usage.limit === 1 ? "" : "s"} left today`;
+        } else {
+            el.textContent = `${(usage && usage.limit) || DAILY_QUESTIONS} questions a day — none used yet today`;
+        }
+    }
+
+    // Shows the settings in place of the conversation, or the conversation again.
+    function showSettings(open) {
+        chat.body.hidden = open;
+        chat.settings.view.hidden = !open;
+        chat.gear.setAttribute("aria-pressed", String(open));
+        chat.gear.title = open ? "Back to the chat" : "Settings";
+        if (!open) {
+            if (chat.settings.test.textContent === "Stop") speech.stop();
+            chat.input.focus();
+            keepOnScreen(chat.panel);
+            return;
+        }
+        if (!fillVoices()) speechSynthesis.addEventListener("voiceschanged", fillVoices, { once: true });
+        showSpeeds();
+        for (const [key, box] of Object.entries(chat.settings.switches)) box.checked = settings[key];
+        showUsage(null);
+        try {
+            browser.storage.local.get("usage").then((items) => showUsage(items.usage), () => {});
+        } catch (e) {
+            // the default line stays
+        }
+        keepOnScreen(chat.panel);
+    }
+
+    // Keeps the open settings in step with changes made elsewhere (the settings page, another tab).
+    function refreshSettingsView() {
+        if (!chat || chat.settings.view.hidden) return;
+        for (const [key, box] of Object.entries(chat.settings.switches)) box.checked = settings[key];
+        showSpeeds();
+    }
+
+    // ----- Toolbar button -----
+    // background.js sends "listen:open-chat" when Listen's toolbar button is clicked: the chat opens with any
+    // highlighted text attached, or closes if it's open and nothing new is highlighted. With AI features off
+    // the answer is false, and background.js opens the settings page instead.
+
+    function openFromToolbar() {
+        if (!settings.aiFeatures) return false;
+        const result = readSelection();
+        if (result) {
+            selectedText = result.text;
+            selectedRange = result.range;
+            selectedCodeBlock = result.codeBlock;
+            imageTarget = null;
+            openAsk("toolbar");
+        } else if (isAskOpen()) {
+            closeAsk();
+        } else {
+            openChat("toolbar");
+        }
+        return true;
+    }
+
+    try {
+        browser.runtime.onMessage.addListener((message) => {
+            if (message && message.type === "listen:open-chat") return Promise.resolve(openFromToolbar());
+        });
+    } catch (e) {
+        console.warn("[Listen] Toolbar messages unavailable:", e);
+    }
+
+    // ----- Charts and tables -----
+    // Gemini can answer with data for a chart or a table (checked by the proxy); it's checked again here and
+    // drawn with DOM calls. Nothing the model writes is ever used as HTML, SVG or code: only these data
+    // fields, as text and numbers.
+
+    const VISUAL_LIMITS = { series: 12, labels: 200, values: 2400, slices: 12, columns: 10, rows: 50 };
+    // Apple's system colours: clear on both light and dark backgrounds.
+    const CHART_COLORS = [
+        "#0a84ff", "#ff9f0a", "#30d158", "#ff375f", "#bf5af2", "#64d2ff",
+        "#ffd60a", "#ac8e68", "#5e5ce6", "#ff6961", "#32ade6", "#8e8e93",
+    ];
+    const CHART_W = 320;
+    const CHART_H = 210;
+    const compactNumber = new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 });
+    const fullNumber = new Intl.NumberFormat(undefined, { maximumFractionDigits: 4 });
+
+    function plainText(value, max) {
+        if (typeof value !== "string" && typeof value !== "number") return "";
+        return String(value).replace(/\s+/g, " ").trim().slice(0, max);
+    }
+
+    // A checked copy of a chart or table from the proxy, or null.
+    function cleanVisual(visual) {
+        if (!visual || typeof visual !== "object") return null;
+        if (visual.kind === "table") {
+            if (!Array.isArray(visual.headers) || !Array.isArray(visual.rows)) return null;
+            const headers = visual.headers.slice(0, VISUAL_LIMITS.columns).map((h) => plainText(h, 80));
+            const rows = visual.rows
+                .filter(Array.isArray)
+                .slice(0, VISUAL_LIMITS.rows)
+                .map((row) => headers.map((_, i) => plainText(row[i], 200)));
+            return headers.length && rows.length ? { kind: "table", title: plainText(visual.title, 120), headers, rows } : null;
+        }
+        if (visual.kind !== "chart" || !["bar", "line", "pie"].includes(visual.type)) return null;
+        if (!Array.isArray(visual.labels) || !Array.isArray(visual.series)) return null;
+        const labels = visual.labels.map((l) => plainText(l, 60));
+        if (!labels.length || labels.length > VISUAL_LIMITS.labels) return null;
+        const series = visual.series.slice(0, visual.type === "pie" ? 1 : VISUAL_LIMITS.series).map((item) => ({
+            name: plainText(item && item.name, 60),
+            values: item && Array.isArray(item.values) ? item.values : [],
+        }));
+        const valid = (s) => s.values.length === labels.length && s.values.every((v) => typeof v === "number" && Number.isFinite(v));
+        if (!series.length || !series.every(valid) || series.length * labels.length > VISUAL_LIMITS.values) return null;
+        if (visual.type === "pie") {
+            const values = series[0].values;
+            if (labels.length > VISUAL_LIMITS.slices || values.some((v) => v < 0) || !values.some((v) => v > 0)) return null;
+        }
+        return {
+            kind: "chart", type: visual.type, title: plainText(visual.title, 120), xLabel: plainText(visual.xLabel, 60),
+            yLabel: plainText(visual.yLabel, 60), labels, series,
+        };
+    }
+
+    // Tab-separated rows, which paste into Numbers, Sheets or Excel as a table.
+    function visualText(visual) {
+        const cell = (value) => String(value).replace(/[\t\r\n]+/g, " ");
+        const rows =
+            visual.kind === "table"
+                ? [visual.headers, ...visual.rows]
+                : [
+                    [visual.xLabel || "Label", ...visual.series.map((s, i) => s.name || `Series ${i + 1}`)],
+                    ...visual.labels.map((label, i) => [label, ...visual.series.map((s) => s.values[i])]),
+                ];
+        return rows.map((row) => row.map(cell).join("\t")).join("\n");
+    }
+
+    function svgEl(tag, attrs, parent) {
+        const el = document.createElementNS(SVG_NS, tag);
+        for (const [key, value] of Object.entries(attrs)) el.setAttribute(key, String(value));
+        if (parent) parent.append(el);
+        return el;
+    }
+
+    function svgText(text, attrs, parent) {
+        const el = svgEl("text", attrs, parent);
+        el.textContent = text;
+        return el;
+    }
+
+    const shorten = (text, max) => (text.length > max ? `${text.slice(0, max - 1)}…` : text);
+
+    // Round axis steps covering lo..hi, e.g. 0, 20 000, 40 000…
+    function niceScale(lo, hi) {
+        if (lo === hi) hi = lo + 1;
+        const rough = (hi - lo) / 4;
+        const magnitude = 10 ** Math.floor(Math.log10(rough));
+        const step = [1, 2, 2.5, 5, 10].map((m) => m * magnitude).find((s) => s >= rough);
+        const min = Math.floor(lo / step) * step;
+        const max = Math.ceil(hi / step) * step;
+        const ticks = [];
+        for (let v = min; v <= max + step / 1000; v += step) ticks.push(Math.round(v / step) * step);
+        return { min, max, ticks };
+    }
+
+    // A small tooltip inside the chart's box, following the pointer over bars, points and slices.
+    function addTooltip(box) {
+        const tip = document.createElement("div");
+        tip.className = "chart-tip";
+        tip.hidden = true;
+        box.append(tip);
+        return (shape, text) => {
+            shape.classList.add("hit");
+            shape.addEventListener("pointermove", (event) => {
+                const r = box.getBoundingClientRect();
+                tip.textContent = text;
+                tip.hidden = false;
+                const x = Math.min(event.clientX - r.left + 12, r.width - tip.offsetWidth - 4);
+                tip.style.left = `${Math.max(4, x)}px`;
+                tip.style.top = `${Math.max(4, event.clientY - r.top - tip.offsetHeight - 8)}px`;
+            });
+            shape.addEventListener("pointerleave", () => (tip.hidden = true));
+        };
+    }
+
+    // Bar and line charts: value axis with round steps, gridlines, slanted labels when they're long or many.
+    function drawAxesChart(svg, chart, tooltip) {
+        const { labels, series, type } = chart;
+        const values = series.flatMap((s) => s.values);
+        const scale = niceScale(Math.min(0, ...values), Math.max(0, ...values));
+        const tickWidth = Math.max(...scale.ticks.map((t) => compactNumber.format(t).length)) * 6;
+        const longest = Math.max(...labels.map((l) => l.length));
+        const left = tickWidth + 10 + (chart.yLabel ? 14 : 0);
+        const right = 8;
+        const band = (CHART_W - left - right) / labels.length;
+        const slanted = longest * 5.6 > band - 4;
+        const bottom = (slanted ? Math.min(60, 12 + Math.min(longest, 14) * 4.2) : 18) + (chart.xLabel ? 16 : 0);
+        const top = 8;
+        const x0 = left;
+        const y0 = top;
+        const y1 = CHART_H - bottom;
+        const y = (v) => y1 - ((v - scale.min) / (scale.max - scale.min)) * (y1 - y0);
+
+        for (const t of scale.ticks) {
+            svgEl("line", { x1: x0, x2: CHART_W - right, y1: y(t), y2: y(t), class: t === 0 ? "axis" : "grid" }, svg);
+            svgText(compactNumber.format(t), { x: x0 - 5, y: y(t) + 3.5, "text-anchor": "end", class: "tick" }, svg);
+        }
+        if (chart.yLabel) {
+            svgText(shorten(chart.yLabel, 34), {
+                x: 10, y: (y0 + y1) / 2, "text-anchor": "middle", class: "axis-title", transform: `rotate(-90 10 ${(y0 + y1) / 2})`,
+            }, svg);
+        }
+        if (chart.xLabel) {
+            svgText(shorten(chart.xLabel, 50), { x: (x0 + CHART_W - right) / 2, y: CHART_H - 3, "text-anchor": "middle", class: "axis-title" }, svg);
+        }
+        // Label every nth band so labels don't overlap.
+        const every = Math.ceil(labels.length / (slanted ? 24 : Math.max(1, Math.floor((CHART_W - left) / 36))));
+        labels.forEach((label, i) => {
+            if (i % every) return;
+            const cx = x0 + band * (i + 0.5);
+            if (slanted) {
+                svgText(shorten(label, 14), { x: cx, y: y1 + 10, "text-anchor": "end", class: "tick", transform: `rotate(-40 ${cx} ${y1 + 10})` }, svg);
+            } else {
+                svgText(shorten(label, Math.max(3, Math.floor(band / 5.6))), { x: cx, y: y1 + 13, "text-anchor": "middle", class: "tick" }, svg);
+            }
+        });
+
+        const name = (s, i) => s.name || `Series ${i + 1}`;
+        const several = series.length > 1;
+        if (type === "bar") {
+            const inner = band * 0.8;
+            const width = inner / series.length;
+            series.forEach((s, j) => {
+                s.values.forEach((v, i) => {
+                    const bar = svgEl("rect", {
+                        x: x0 + band * i + band * 0.1 + width * j, y: y(Math.max(v, 0)), width: Math.max(1, width - (several ? 1 : 0)),
+                        height: Math.max(1, Math.abs(y(v) - y(0))), rx: Math.min(3, width / 4),
+                        fill: CHART_COLORS[(several ? j : i) % CHART_COLORS.length],
+                    }, svg);
+                    tooltip(bar, `${labels[i]}${several ? ` · ${name(s, j)}` : ""}: ${fullNumber.format(v)}`);
+                });
+            });
+        } else {
+            series.forEach((s, j) => {
+                const color = CHART_COLORS[j % CHART_COLORS.length];
+                const points = s.values.map((v, i) => [x0 + band * (i + 0.5), y(v)]);
+                svgEl("polyline", { points: points.map((p) => p.join(",")).join(" "), fill: "none", stroke: color, "stroke-width": 2, "stroke-linejoin": "round" }, svg);
+                points.forEach(([px, py], i) => {
+                    const dot = svgEl("circle", { cx: px, cy: py, r: labels.length > 40 ? 2 : 3.5, fill: color }, svg);
+                    tooltip(dot, `${labels[i]}${several ? ` · ${name(s, j)}` : ""}: ${fullNumber.format(s.values[i])}`);
+                });
+            });
+        }
+    }
+
+    function drawPie(svg, chart, tooltip) {
+        const values = chart.series[0].values;
+        const total = values.reduce((a, b) => a + b, 0);
+        const cx = CHART_W / 2;
+        const cy = CHART_H / 2;
+        const r = CHART_H / 2 - 8;
+        let angle = -Math.PI / 2;
+        values.forEach((v, i) => {
+            if (v <= 0) return;
+            const share = v / total;
+            const color = CHART_COLORS[i % CHART_COLORS.length];
+            const text = `${chart.labels[i]}: ${fullNumber.format(v)} (${fullNumber.format(Math.round(share * 1000) / 10)}%)`;
+            if (share >= 0.9999) {
+                tooltip(svgEl("circle", { cx, cy, r, fill: color }, svg), text);
+                return;
+            }
+            const end = angle + share * 2 * Math.PI;
+            const d = `M ${cx} ${cy} L ${cx + r * Math.cos(angle)} ${cy + r * Math.sin(angle)} ` +
+                `A ${r} ${r} 0 ${share > 0.5 ? 1 : 0} 1 ${cx + r * Math.cos(end)} ${cy + r * Math.sin(end)} Z`;
+            tooltip(svgEl("path", { d, fill: color, class: "slice" }, svg), text);
+            angle = end;
+        });
+    }
+
+    function legend(items) {
+        const box = document.createElement("div");
+        box.className = "legend";
+        for (const [label, color] of items) {
+            const item = document.createElement("span");
+            item.className = "legend-item";
+            const swatch = document.createElement("span");
+            swatch.className = "swatch";
+            swatch.style.background = color;
+            item.append(swatch, label);
+            box.append(item);
+        }
+        return box;
+    }
+
+    function tableElement(table) {
+        const wrap = document.createElement("div");
+        wrap.className = "table-wrap";
+        const el = document.createElement("table");
+        // Columns of numbers are right-aligned, header included.
+        const isNumber = (value) => /^[-−+]?[\d.,\s]+%?$/.test(value) && /\d/.test(value);
+        const numeric = table.headers.map((_, i) => table.rows.every((row) => !row[i] || isNumber(row[i])));
+        const head = el.createTHead().insertRow();
+        table.headers.forEach((header, i) => {
+            const th = document.createElement("th");
+            th.textContent = header;
+            if (numeric[i]) th.className = "num";
+            head.append(th);
+        });
+        const body = el.createTBody();
+        for (const row of table.rows) {
+            const tr = body.insertRow();
+            row.forEach((value, i) => {
+                const td = tr.insertCell();
+                td.textContent = value;
+                if (numeric[i]) td.className = "num";
+            });
+        }
+        wrap.append(el);
+        return wrap;
+    }
+
+    function visualElement(visual) {
+        const box = document.createElement("div");
+        box.className = `visual ${visual.kind}`;
+        if (visual.title) {
+            const title = document.createElement("div");
+            title.className = "visual-title";
+            title.textContent = visual.title;
+            box.append(title);
+        }
+        if (visual.kind === "table") {
+            box.append(tableElement(visual));
+            return box;
+        }
+        const tooltip = addTooltip(box);
+        const svg = svgEl("svg", { viewBox: `0 0 ${CHART_W} ${CHART_H}`, role: "img" });
+        svg.setAttribute("aria-label", visual.title || "Chart");
+        if (visual.type === "pie") drawPie(svg, visual, tooltip);
+        else drawAxesChart(svg, visual, tooltip);
+        box.append(svg);
+        if (visual.type === "pie") {
+            const total = visual.series[0].values.reduce((a, b) => a + b, 0);
+            box.append(legend(visual.labels.map((label, i) => [
+                `${label} ${fullNumber.format(Math.round((visual.series[0].values[i] / total) * 1000) / 10)}%`,
+                CHART_COLORS[i % CHART_COLORS.length],
+            ])));
+        } else if (visual.series.length > 1) {
+            box.append(legend(visual.series.map((s, j) => [s.name || `Series ${j + 1}`, CHART_COLORS[j % CHART_COLORS.length]])));
+        }
+        return box;
     }
 
     // ----- Read aloud and Copy -----
@@ -2631,7 +3246,7 @@
     function updateSpeakButtons() {
         if (!chat) return;
         for (const msg of chat.messages.querySelectorAll(".msg.model")) {
-            const playing = readingAnswer === msg.querySelector(".answer");
+            const playing = readingAnswer === msg.querySelector(".answer-text");
             const speak = msg.querySelector("button.speak");
             speak.replaceChildren(playing ? "■" : svgIcon("speaker", 14));
             speak.classList.toggle("stop", playing);
