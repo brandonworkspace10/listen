@@ -577,7 +577,7 @@
             clear();
             buildTextMap(range);
             darkMode = isDarkBackground(range);
-            console.info(`[Listen] Highlight mode: ${darkMode ? "dark" : "light"}`);
+            L.debug(`Highlight mode: ${darkMode ? "dark" : "light"}`);
             return text;
         }
 

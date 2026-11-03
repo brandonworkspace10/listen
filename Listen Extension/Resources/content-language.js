@@ -99,8 +99,8 @@
             } else {
                 lang = attribute || (textual && textual.lang) || "en";
             }
-            console.info(
-                `[Listen] Language check: lang attribute "${attribute || "none"}", ` +
+            L.debug(
+                `Language check: lang attribute "${attribute || "none"}", ` +
                 `text ${textual ? `"${textual.lang}" (${textual.how})` : "unsure"} → ${lang}`
             );
             return lang;

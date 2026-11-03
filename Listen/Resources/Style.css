@@ -167,3 +167,13 @@ button {
 button:active {
     opacity: 0.85;
 }
+
+.links {
+    margin: 0;
+    font-size: 12px;
+}
+
+.links a {
+    color: var(--muted);
+    cursor: pointer;
+}

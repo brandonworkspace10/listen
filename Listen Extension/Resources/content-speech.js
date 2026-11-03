@@ -111,7 +111,7 @@
                 entry.wordTimingCheck = setTimeout(() => {
                     if (current !== entry || entry.sawWord) return;
                     const name = entry.voice ? entry.voice.name : "This voice";
-                    console.info(`[Listen] ${name} doesn't report word positions, so words won't be highlighted.`);
+                    L.debug(`${name} doesn't report word positions, so words won't be highlighted.`);
                     entry.callbacks.onWordTimingUnavailable();
                 }, WORD_TIMING_GRACE_MS);
             };
@@ -124,11 +124,11 @@
             stop();
             let voice = pickVoice(lang);
             if (!voice && normalizeLang(lang).split("-")[0] !== "en") {
-                console.info(`[Listen] No installed voice for "${lang}"; falling back to English.`);
+                L.debug(`No installed voice for "${lang}"; falling back to English.`);
                 lang = "en";
                 voice = pickVoice(lang);
             }
-            console.info(`[Listen] Detected language: ${lang}, voice: ${voice ? `${voice.name} (${voice.lang})` : "system default"}`);
+            L.debug(`Detected language: ${lang}, voice: ${voice ? `${voice.name} (${voice.lang})` : "system default"}`);
             const entry = {
                 text, callbacks, lang, voice, utterance: null, wordStart: 0, sawWord: false, wordTimingCheck: null,
             };

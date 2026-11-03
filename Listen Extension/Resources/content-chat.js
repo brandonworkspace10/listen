@@ -22,6 +22,7 @@
     const HISTORY_TURNS = 6; // earlier turns sent along as context: the last three questions and answers
     const HISTORY_TURN_CHARS = 2000;
     const MAX_TURNS_KEPT = 40;
+    const PRIVACY_URL = "https://listen-proxy.vercel.app/privacy";
 
     // Quick actions: [action sent to background.js, label, tooltip], per kind of attachment.
     const CHIPS = [
@@ -407,6 +408,18 @@
         .panel button.speak:hover, .panel button.copy:hover { background: var(--chat-soft); color: var(--chat-text); }
         .copied { margin-left: 4px; color: var(--chat-muted); font-size: 12px; }
         .empty { margin: 0; color: var(--chat-muted); font-size: 13px; }
+        .notice {
+            flex: none;
+            padding: 10px 12px;
+            border: 1px solid var(--chat-border);
+            border-radius: 12px;
+            background: var(--chat-card);
+            font-size: 13px;
+            line-height: 1.4;
+        }
+        .notice p { margin: 0 0 8px; }
+        .notice-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+        .panel a { color: var(--chat-accent-text); cursor: pointer; }
         .status { margin-top: 0; color: var(--chat-muted); }
         .status.error { color: var(--chat-error); }
         .status.loading::before { border-color: var(--chat-border); border-top-color: var(--chat-muted); }
@@ -547,6 +560,16 @@
         return b;
     }
 
+    // "Privacy policy", opening in a new tab.
+    function privacyLink() {
+        const link = document.createElement("a");
+        link.href = PRIVACY_URL;
+        link.target = "_blank";
+        link.rel = "noopener";
+        link.textContent = "Privacy policy";
+        return link;
+    }
+
     function createChat() {
         chatHost = document.createElement("listen-chat-root");
         chatHost.style.cssText = "all: initial; position: fixed; left: 0; top: 0; width: 0; height: 0; z-index: 2147483647;";
@@ -600,15 +623,28 @@
         input.setAttribute("aria-label", "Message");
         const send = chatButton("send", "Send", "↑");
         row.append(input, send);
-        body.append(attachment, messages, empty, status, chips, row);
+        // Shown the first time the chat is used (see First-use notice).
+        const notice = document.createElement("div");
+        notice.className = "notice";
+        notice.setAttribute("role", "note");
+        notice.hidden = true;
+        const noticeText = document.createElement("p");
+        noticeText.textContent =
+            "Questions you ask here, and anything you attach, are sent to Google Gemini through Listen's server to be answered.";
+        const noticeActions = document.createElement("div");
+        noticeActions.className = "notice-actions";
+        const gotIt = chatButton("head-button", "Got it", "Got it");
+        noticeActions.append(privacyLink(), gotIt);
+        notice.append(noticeText, noticeActions);
+        body.append(notice, attachment, messages, empty, status, chips, row);
         const settingsView = buildSettings();
         panel.append(head, body, settingsView.view);
 
         chatShadow.append(style, bubble, panel);
         document.documentElement.appendChild(chatHost);
         chat = {
-            panel, head, bubble, body, gear, settings: settingsView, attachment, attachmentText, messages, empty, status,
-            chipRow: chips, chips: [], input, send,
+            panel, head, bubble, body, gear, settings: settingsView, notice, attachment, attachmentText, messages, empty,
+            status, chipRow: chips, chips: [], input, send,
         };
 
         // Keep typing out of the page (site shortcuts) and out of our own page-level key handlers.
@@ -628,6 +664,10 @@
         newChat.addEventListener("click", () => startNewChat());
         close.addEventListener("click", () => closeAsk());
         gear.addEventListener("click", () => showSettings(chat.body.hidden === false));
+        gotIt.addEventListener("click", () => {
+            dismissNotice();
+            input.focus();
+        });
         detach.addEventListener("click", () => {
             clearAttachment();
             saveChat();
@@ -775,6 +815,32 @@
         // default positions
     }
 
+    // ----- First-use notice -----
+    // The first time the chat opens it says where questions go, with a link to the privacy policy, until "Got
+    // it" or the first question. Remembered in browser.storage.local, for every tab.
+
+    let noticeSeen = true; // until storage says otherwise, so it never flashes up for people who've seen it
+
+    function dismissNotice() {
+        noticeSeen = true;
+        if (chat) chat.notice.hidden = true;
+        storeSetting({ chatNoticeSeen: true });
+    }
+
+    try {
+        browser.storage.local.get("chatNoticeSeen").then((items) => {
+            noticeSeen = items.chatNoticeSeen === true;
+            if (isAskOpen()) chat.notice.hidden = noticeSeen;
+        }, () => {});
+        browser.storage.onChanged.addListener((changes, area) => {
+            if (area !== "local" || !changes.chatNoticeSeen) return;
+            noticeSeen = changes.chatNoticeSeen.newValue === true;
+            if (chat) chat.notice.hidden = noticeSeen;
+        });
+    } catch (e) {
+        // shown each time the chat opens on this page until dismissed
+    }
+
     // ----- Opening and closing -----
 
     function isAskOpen() {
@@ -788,6 +854,7 @@
         const wasOpen = isAskOpen();
         chat.panel.hidden = false;
         if (chat.body.hidden) showSettings(false);
+        chat.notice.hidden = noticeSeen;
         renderAttachment();
         renderTurns();
         if (!wasOpen) placePanel(from);
@@ -1082,6 +1149,7 @@
     // `userText` as the student's message and the answer below it.
     async function askGemini(request, answerLang, userText) {
         if (askBusy) return;
+        if (!noticeSeen) dismissNotice(); // asking counts as having read it
         if (S.readingAnswer) L.speech.stop();
         const id = askRequest;
         const history = historyForRequest();
@@ -1174,7 +1242,7 @@
         usage.className = "settings-note";
         const privacy = document.createElement("p");
         privacy.className = "settings-note";
-        privacy.textContent = "Questions are sent to Google Gemini to answer. Reading stays on your Mac.";
+        privacy.append("Questions are sent to Google Gemini to answer. Reading stays on your Mac. ", privacyLink());
 
         view.append(settingsHeading("Voice"), voiceRow, settingsHeading("Default speed"), speeds, ...toggles, usage, privacy);
 

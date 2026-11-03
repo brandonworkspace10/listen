@@ -34,6 +34,15 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
         showExtensionState()
     }
 
+    // Links on the page (the privacy policy) open in the default browser, not in this window.
+    func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction) async -> WKNavigationActionPolicy {
+        if navigationAction.navigationType == .linkActivated, let url = navigationAction.request.url {
+            NSWorkspace.shared.open(url)
+            return .cancel
+        }
+        return .allow
+    }
+
     // Tells the page whether Listen is turned on in Safari.
     func showExtensionState() {
         guard let webView = self.webView, !webView.isLoading else { return }
@@ -44,11 +53,7 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
             }
 
             DispatchQueue.main.async {
-                if #available(macOS 13, *) {
-                    webView.evaluateJavaScript("show(\(state.isEnabled), true)")
-                } else {
-                    webView.evaluateJavaScript("show(\(state.isEnabled), false)")
-                }
+                webView.evaluateJavaScript("show(\(state.isEnabled))")
             }
         }
     }

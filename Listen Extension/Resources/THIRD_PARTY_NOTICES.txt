@@ -1,5 +1,0 @@
-THIRD-PARTY NOTICES — Listen Safari Extension
-==============================================
-
-Listen currently bundles and downloads no third-party components.
-Reading aloud uses the voices built into macOS through Safari's Web Speech API.

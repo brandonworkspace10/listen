@@ -246,3 +246,7 @@ footer p {
     color: var(--muted);
     font-size: 11px;
 }
+
+.privacy a {
+    color: inherit;
+}

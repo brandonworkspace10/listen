@@ -1,6 +1,5 @@
 // Called from ViewController.swift with whether Listen is turned on in Safari (or null if unknown).
-// The second argument is kept from the template (Safari 16+ says "Settings", not "Preferences").
-function show(enabled, useSettingsInsteadOfPreferences) {
+function show(enabled) {
     if (typeof enabled === "boolean") {
         document.body.classList.toggle(`state-on`, enabled);
         document.body.classList.toggle(`state-off`, !enabled);
