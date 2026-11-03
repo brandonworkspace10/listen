@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Try Listen</title>
+<meta name="description" content="A page to try the Listen Safari extension on: text, a table, maths, an email, code, an image, a chart and a link.">
+<style>
+    :root {
+        color-scheme: light dark;
+        --bg: #ffffff;
+        --text: #1c1c1e;
+        --muted: #6e6e73;
+        --line: #e5e5ea;
+        --soft: #f2f2f7;
+        --link: #0a64c8;
+        --bar: #0a84ff;
+    }
+    @media (prefers-color-scheme: dark) {
+        :root {
+            --bg: #1c1c1e;
+            --text: #f2f2f7;
+            --muted: #98989d;
+            --line: #38383a;
+            --soft: #2c2c2e;
+            --link: #64b0ff;
+        }
+    }
+    body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font: 400 18px/1.6 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+    }
+    main { max-width: 720px; margin: 0 auto; padding: 48px 16px 64px; }
+    h1 { margin: 0 0 4px; font-size: 34px; line-height: 1.2; }
+    h2 { margin: 40px 0 8px; font-size: 22px; }
+    p { margin: 0 0 12px; }
+    a { color: var(--link); }
+    .intro { color: var(--muted); }
+    .sample { padding: 14px 18px; border-radius: 12px; background: var(--soft); }
+    .maths p { margin: 0 0 6px; font-size: 20px; }
+    table { border-collapse: collapse; }
+    th, td { padding: 6px 14px; border-bottom: 1px solid var(--line); text-align: left; }
+    th { font-weight: 600; }
+    td.num { text-align: right; }
+    pre { margin: 0; padding: 14px 18px; overflow-x: auto; border-radius: 12px; background: var(--soft); font-size: 15px; }
+    figure { margin: 0; }
+    figcaption { margin-top: 6px; color: var(--muted); font-size: 15px; }
+    svg text { fill: currentColor; font: 12px -apple-system, sans-serif; }
+</style>
+</head>
+<body>
+<main>
+    <h1>Try Listen</h1>
+    <p class="intro">Highlight anything on this page, then use Listen's bar: the speaker reads it aloud and the chat button asks about it. Or click Listen's toolbar button to chat with nothing highlighted. Buttons on images, charts and links appear once they're switched on in Listen's settings (the gear in the chat).</p>
+
+    <h2>Read aloud</h2>
+    <p>Photosynthesis is how plants make their own food. Using energy from sunlight, they turn water and carbon dioxide into sugar, and release oxygen into the air. It happens mostly in the leaves, inside tiny structures called chloroplasts, which contain the green pigment chlorophyll.</p>
+
+    <h2>A table</h2>
+    <table>
+        <thead><tr><th>Planet</th><th>Diameter (km)</th><th>Moons</th></tr></thead>
+        <tbody>
+            <tr><td>Mercury</td><td class="num">4,879</td><td class="num">0</td></tr>
+            <tr><td>Venus</td><td class="num">12,104</td><td class="num">0</td></tr>
+            <tr><td>Earth</td><td class="num">12,742</td><td class="num">1</td></tr>
+            <tr><td>Mars</td><td class="num">6,779</td><td class="num">2</td></tr>
+        </tbody>
+    </table>
+
+    <h2>Maths</h2>
+    <div class="sample maths">
+        <p>5 + 7 + 8 + 6</p>
+        <p>2x + 3 = 7</p>
+        <p>Solve 3x − 7 = 11. My answer: x = 5</p>
+        <p>What is 3/4 + 1/6?</p>
+        <p>A shop sells pencils for 35p each. Sam buys 6 pencils and pays with a £5 note. How much change does Sam get?</p>
+        <p>The quadratic formula:
+            <math display="block"><mi>x</mi><mo>=</mo><mfrac><mrow><mo>−</mo><mi>b</mi><mo>±</mo><msqrt><msup><mi>b</mi><mn>2</mn></msup><mo>−</mo><mn>4</mn><mi>a</mi><mi>c</mi></msqrt></mrow><mrow><mn>2</mn><mi>a</mi></mrow></mfrac></math>
+        </p>
+    </div>
+
+    <h2>An email</h2>
+    <div class="sample">
+        <p>Hi Sam,</p>
+        <p>Could you send me your notes from Tuesday's lecture? I missed it, and the test is on Friday.</p>
+        <p>Thanks,<br>Priya</p>
+    </div>
+
+    <h2>Code</h2>
+    <pre><code class="language-js">function average(numbers) {
+    let total = 0;
+    for (const n of numbers) total += n;
+    return total / numbers.length;
+}</code></pre>
+
+    <h2>An image</h2>
+    <figure>
+        <img src="/try/sun.png" width="320" height="200" alt="A yellow sun shining over two green hills under a blue sky">
+        <figcaption>Rest the pointer on the picture.</figcaption>
+    </figure>
+
+    <h2>A chart</h2>
+    <figure>
+        <svg width="420" height="230" viewBox="0 0 420 230" role="img" aria-label="Bar chart of average monthly rainfall in London, in millimetres">
+            <title>Average monthly rainfall in London (mm)</title>
+            <line x1="40" y1="190" x2="410" y2="190" stroke="currentColor" stroke-width="1"/>
+            <g fill="#0a84ff">
+                <rect x="50" y="90" width="22" height="100"/><rect x="80" y="117" width="22" height="73"/>
+                <rect x="110" y="114" width="22" height="76"/><rect x="140" y="122" width="22" height="68"/>
+                <rect x="170" y="116" width="22" height="74"/><rect x="200" y="115" width="22" height="75"/>
+                <rect x="230" y="122" width="22" height="68"/><rect x="260" y="111" width="22" height="79"/>
+                <rect x="290" y="111" width="22" height="79"/><rect x="320" y="94" width="22" height="96"/>
+                <rect x="350" y="89" width="22" height="101"/><rect x="380" y="85" width="22" height="105"/>
+            </g>
+            <g text-anchor="middle">
+                <text x="61" y="206">Jan</text><text x="91" y="206">Feb</text><text x="121" y="206">Mar</text>
+                <text x="151" y="206">Apr</text><text x="181" y="206">May</text><text x="211" y="206">Jun</text>
+                <text x="241" y="206">Jul</text><text x="271" y="206">Aug</text><text x="301" y="206">Sep</text>
+                <text x="331" y="206">Oct</text><text x="361" y="206">Nov</text><text x="391" y="206">Dec</text>
+            </g>
+            <text x="10" y="20">mm</text>
+        </svg>
+        <figcaption>Average monthly rainfall in London, in millimetres.</figcaption>
+    </figure>
+
+    <h2>A link</h2>
+    <p>Rest the pointer on this link: <a href="https://en.wikipedia.org/wiki/Photosynthesis">Photosynthesis on Wikipedia</a>.</p>
+</main>
+</body>
+</html>

@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Listen privacy policy</title>
+<meta name="description" content="What the Listen Safari extension keeps on your Mac, what it sends to Google Gemini through Listen's server, and what it never does.">
+<style>
+    :root {
+        color-scheme: light dark;
+        --bg: #ffffff;
+        --text: #1c1c1e;
+        --muted: #6e6e73;
+        --line: #e5e5ea;
+        --soft: #f2f2f7;
+        --link: #0a64c8;
+    }
+    @media (prefers-color-scheme: dark) {
+        :root {
+            --bg: #1c1c1e;
+            --text: #f2f2f7;
+            --muted: #98989d;
+            --line: #38383a;
+            --soft: #2c2c2e;
+            --link: #64b0ff;
+        }
+    }
+    body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font: 400 17px/1.6 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+    }
+    main {
+        max-width: 680px;
+        margin: 0 auto;
+        padding: 48px 16px 64px;
+    }
+    h1 { margin: 0 0 4px; font-size: 32px; line-height: 1.2; }
+    h2 { margin: 36px 0 8px; font-size: 21px; }
+    p, ul { margin: 0 0 12px; }
+    ul { padding-left: 22px; }
+    li { margin-bottom: 6px; }
+    a { color: var(--link); }
+    .updated { margin-bottom: 28px; color: var(--muted); }
+    .summary {
+        padding: 16px 20px;
+        border-radius: 14px;
+        background: var(--soft);
+    }
+    .summary ul { margin: 0; }
+    footer { margin-top: 40px; padding-top: 16px; border-top: 1px solid var(--line); color: var(--muted); font-size: 15px; }
+</style>
+</head>
+<body>
+<main>
+    <h1>Listen privacy policy</h1>
+    <p class="updated">Last updated 2 November 2026</p>
+
+    <div class="summary">
+        <ul>
+            <li>Reading highlighted text aloud happens on your Mac, with the voices built into macOS.</li>
+            <li>When you use Listen's AI features, what you ask about is sent to Google Gemini through Listen's server to be answered.</li>
+            <li>No accounts, no ads, no tracking. We don't sell or share your data.</li>
+        </ul>
+    </div>
+
+    <h2>What stays on your Mac</h2>
+    <ul>
+        <li>The text you highlight and everything Listen reads aloud. Reading uses the Mac's own voices; the words never leave your Mac.</li>
+        <li>Your settings: voice, speed, the switches in Listen's settings, the last language you translated into, and where you put the chat panel and bubble. Safari keeps these for Listen on your Mac.</li>
+        <li>Your chat conversation. Safari keeps it in memory for that tab until you press New chat, close the tab or quit Safari.</li>
+        <li>How many questions you have left today, so the settings can show it.</li>
+    </ul>
+
+    <h2>What is sent, and when</h2>
+    <p>Listen sends something only when you use one of its AI features: the chat, a quick action such as Summarize, Explain, Reply or Hint, or the speaker on something that can't simply be read out (describing an image or chart, summarizing a linked page, explaining a selection of code, or putting a complicated equation into words). Then it sends to Listen's server:</p>
+    <ul>
+        <li>your question or request, and what it's about: the text you highlighted, or the email, code or maths you attached;</li>
+        <li>for an image or chart, the picture, made smaller first;</li>
+        <li>for a link, the text of the linked page, which Listen downloads without your cookies or logins (public pages only);</li>
+        <li>the last few messages of the chat, so follow-up questions make sense;</li>
+        <li>a random install ID (see below).</li>
+    </ul>
+    <p>Listen's server adds its own instructions and passes your request to Google's Gemini API, which writes the answer. The server sends the answer back to your Mac. It doesn't keep your questions, what you attached, or the answers.</p>
+    <p>If you turn off AI features in Listen's settings, nothing is sent.</p>
+
+    <h2>Google Gemini</h2>
+    <p>Google processes your requests to produce the answers, under the <a href="https://ai.google.dev/gemini-api/terms">Gemini API terms</a> and <a href="https://policies.google.com/privacy">Google's privacy policy</a>. Google may keep requests for a limited time, for example to detect abuse, as its terms describe. Please don't send anything you wouldn't want Google to process, such as passwords or private details about other people.</p>
+
+    <h2>The install ID and daily counts</h2>
+    <p>The first time you use an AI feature, Listen makes a random ID on your Mac. It isn't connected to your name, email, Apple Account or device. Listen's server uses it only to count how many questions each install asks per day, so everyone stays within a fair daily limit. The server keeps these counts, and a total for everyone, in a small database (Upstash) and deletes them automatically after two days. The ID itself stays on your Mac, and removing Listen deletes it.</p>
+
+    <h2>What the server records</h2>
+    <p>To fix problems, the server notes the kind of request and whether it worked (for example "summary of highlighted text: answered"), never your text or the answers. Like any website, the company that hosts the server (Vercel) sees your IP address in order to send the answer back, and may keep basic request records such as the time for a short while. Listen doesn't store your IP address.</p>
+
+    <h2>What we don't do</h2>
+    <ul>
+        <li>No accounts or sign-in. We never ask for your name or email.</li>
+        <li>No advertising, analytics or tracking, and no browsing history: Listen doesn't look at pages unless you ask it to.</li>
+        <li>We don't sell, rent or share your data. The only companies involved are the ones named here: Vercel hosts the server, Upstash keeps the daily counts, and Google writes the answers.</li>
+    </ul>
+
+    <h2>Children</h2>
+    <p>Listen has no accounts and doesn't ask for personal details, so it doesn't knowingly collect personal information from anyone, including children. If you think a child has sent personal information through Listen, contact us and we'll help.</p>
+
+    <h2>Changes</h2>
+    <p>If this policy changes, the date at the top will change too, and important changes will be mentioned in Listen's update notes.</p>
+
+    <h2>Contact</h2>
+    <p>Questions or requests about your data: <a href="mailto:brandonworkspace10@gmail.com">brandonworkspace10@gmail.com</a></p>
+
+    <footer>Listen is a Safari extension for macOS that reads web pages aloud and helps you study.</footer>
+</main>
+</body>
+</html>
