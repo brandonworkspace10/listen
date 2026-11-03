@@ -20,7 +20,18 @@
     },
 
     "content_scripts": [{
-        "js": [ "content.js" ],
+        "js": [
+            "content-core.js",
+            "content-speech.js",
+            "content-language.js",
+            "content-maths.js",
+            "content-highlighter.js",
+            "content-bar.js",
+            "content-chat.js",
+            "content-visuals.js",
+            "content-targets.js",
+            "content-main.js"
+        ],
         "matches": [ "*://*/*" ],
         "run_at": "document_idle"
     }],
